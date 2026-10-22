@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	database "github.com/github-radar/github-radar/internal/db"
@@ -103,6 +105,22 @@ func TestRepositoriesFTSSynchronizesInsertUpdateAndDelete(t *testing.T) {
 	}
 	if got := ftsMatchCount(t, store.SQL(), "nebula"); got != 0 {
 		t.Errorf("FTS match count after delete = %d, want 0", got)
+	}
+}
+
+func TestRepositoriesFTSReplaceRemovesOldTerms(t *testing.T) {
+	t.Parallel()
+
+	store := openTestDB(t)
+	insertRepository(t, store.SQL(), 1, "owner/one", "replaceoldterm")
+	if _, err := store.SQL().Exec(strings.Replace(repositoryInsertSQL(), "INSERT INTO", "INSERT OR REPLACE INTO", 1), 1, "owner/one", "replacenewterm"); err != nil {
+		t.Fatalf("replace repository: %v", err)
+	}
+	if got := ftsMatchCount(t, store.SQL(), "replaceoldterm"); got != 0 {
+		t.Errorf("FTS old term match count after replace = %d, want 0", got)
+	}
+	if got := ftsMatchCount(t, store.SQL(), "replacenewterm"); got != 1 {
+		t.Errorf("FTS new term match count after replace = %d, want 1", got)
 	}
 }
 
@@ -230,6 +248,7 @@ func TestTimestampColumnsEnforceUTCRFC3339(t *testing.T) {
 	for _, timestamp := range []string{
 		"not-a-timestamp",
 		"2026-99-99T00:00:00Z",
+		"2026-02-30T00:00:00Z",
 		"2026-10-23T00:00:00.Z",
 	} {
 		t.Run(timestamp, func(t *testing.T) {
@@ -246,17 +265,63 @@ func TestTimestampColumnsEnforceUTCRFC3339(t *testing.T) {
 	}
 }
 
-func TestTimestampColumnsAcceptFractionalUTC(t *testing.T) {
+func TestTimestampColumnsRejectFractionalAndHour24Values(t *testing.T) {
+	t.Parallel()
+
+	for _, timestamp := range []string{
+		"2026-10-23T00:00:00.1Z",
+		"2026-10-23T00:00:00.123456Z",
+		"2026-10-23T24:00:00Z",
+	} {
+		t.Run(timestamp, func(t *testing.T) {
+			store := openTestDB(t)
+			_, err := store.SQL().Exec(`INSERT INTO repositories (
+				github_id, owner, name, full_name, html_url, topics_json,
+				github_created_at, github_updated_at, first_seen_at, sync_status
+			) VALUES (1, 'owner', 'repo', 'owner/repo', 'https://example.test/repo', '[]',
+				?, '2026-10-23T00:00:00Z', '2026-10-23T00:00:00Z', 'ok')`, timestamp)
+			if err == nil {
+				t.Errorf("non-canonical timestamp %q insert succeeded, want CHECK error", timestamp)
+			}
+		})
+	}
+}
+
+func TestTimestampTextOrderingMatchesChronologicalOrdering(t *testing.T) {
 	t.Parallel()
 
 	store := openTestDB(t)
-	_, err := store.SQL().Exec(`INSERT INTO repositories (
-		github_id, owner, name, full_name, html_url, topics_json,
-		github_created_at, github_updated_at, first_seen_at, sync_status
-	) VALUES (1, 'owner', 'repo', 'owner/repo', 'https://example.test/repo', '[]',
-		'2026-10-23T00:00:00.123Z', '2026-10-23T00:00:00.123456Z', '2026-10-23T00:00:00.1Z', 'ok')`)
+	insertRepository(t, store.SQL(), 1, "owner/one", "alpha")
+	for _, timestamp := range []string{
+		"2027-01-01T00:00:00Z",
+		"2026-02-01T00:00:00Z",
+		"2026-10-23T12:34:56Z",
+	} {
+		if _, err := store.SQL().Exec(
+			"INSERT INTO star_snapshots(repo_id, star_count, captured_at, source, sample_status) VALUES (1, 1, ?, 'github', 'ok')",
+			timestamp,
+		); err != nil {
+			t.Fatalf("insert timestamp %q: %v", timestamp, err)
+		}
+	}
+
+	rows, err := store.SQL().Query("SELECT captured_at FROM star_snapshots ORDER BY captured_at")
 	if err != nil {
-		t.Fatalf("insert RFC3339 timestamps with fractional seconds: %v", err)
+		t.Fatalf("query timestamp order: %v", err)
+	}
+	defer rows.Close()
+	want := []string{"2026-02-01T00:00:00Z", "2026-10-23T12:34:56Z", "2027-01-01T00:00:00Z"}
+	for index := 0; rows.Next(); index++ {
+		var got string
+		if err := rows.Scan(&got); err != nil {
+			t.Fatalf("scan timestamp: %v", err)
+		}
+		if index >= len(want) || got != want[index] {
+			t.Fatalf("timestamp at index %d = %q, want %q", index, got, want[index])
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate timestamps: %v", err)
 	}
 }
 
@@ -353,6 +418,67 @@ func TestMigrationIsIdempotentAcrossOpen(t *testing.T) {
 	}
 }
 
+func TestConcurrentOpenSerializesInitializationAndMigration(t *testing.T) {
+	for round := 0; round < 3; round++ {
+		path := filepath.Join(t.TempDir(), "radar.db")
+		const workers = 12
+		stores := make(chan *database.DB, workers)
+		errs := make(chan error, workers)
+		start := make(chan struct{})
+		var group sync.WaitGroup
+
+		for worker := 0; worker < workers; worker++ {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				<-start
+				store, err := database.Open(context.Background(), path)
+				if err != nil {
+					errs <- err
+					return
+				}
+				stores <- store
+			}()
+		}
+		close(start)
+		group.Wait()
+		close(errs)
+		close(stores)
+
+		for err := range errs {
+			t.Errorf("round %d concurrent Open() error = %v", round, err)
+		}
+		var first *database.DB
+		for store := range stores {
+			if first == nil {
+				first = store
+			}
+			if err := store.Close(); err != nil {
+				t.Errorf("round %d Close() error = %v", round, err)
+			}
+		}
+		if first == nil {
+			t.Fatalf("round %d had no successful Open()", round)
+		}
+
+		verify, err := database.Open(context.Background(), path)
+		if err != nil {
+			t.Fatalf("round %d verification Open() error = %v", round, err)
+		}
+		var count int
+		if err := verify.SQL().QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = 1").Scan(&count); err != nil {
+			_ = verify.Close()
+			t.Fatalf("round %d query migration: %v", round, err)
+		}
+		if err := verify.Close(); err != nil {
+			t.Errorf("round %d verification Close() error = %v", round, err)
+		}
+		if count != 1 {
+			t.Errorf("round %d migration count = %d, want 1", round, count)
+		}
+	}
+}
+
 func TestInitialMigrationCreatesAllRequiredTables(t *testing.T) {
 	t.Parallel()
 
@@ -410,6 +536,35 @@ func TestReadySucceedsUntilDatabaseIsClosed(t *testing.T) {
 	}
 }
 
+func TestReadyFailsWhenConnectionIsQueryOnly(t *testing.T) {
+	store := openTestDB(t)
+	store.SQL().SetMaxOpenConns(1)
+	store.SQL().SetMaxIdleConns(1)
+	if _, err := store.SQL().Exec("PRAGMA query_only=ON"); err != nil {
+		t.Fatalf("enable query_only: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = store.SQL().Exec("PRAGMA query_only=OFF")
+	})
+
+	if err := store.Ready(context.Background()); err == nil {
+		t.Fatal("Ready() with query_only=ON error = nil, want write readiness error")
+	}
+	if _, err := store.SQL().Exec("PRAGMA query_only=OFF"); err != nil {
+		t.Fatalf("disable query_only: %v", err)
+	}
+	if err := store.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready() after query_only=OFF error = %v", err)
+	}
+	var readinessRows int
+	if err := store.SQL().QueryRow("SELECT COUNT(*) FROM site_settings WHERE key = '__radar_readiness__'").Scan(&readinessRows); err != nil {
+		t.Fatalf("query readiness residue: %v", err)
+	}
+	if readinessRows != 0 {
+		t.Errorf("readiness residue count = %d, want 0", readinessRows)
+	}
+}
+
 func TestOpenReportsParentPathThatIsAFile(t *testing.T) {
 	t.Parallel()
 
@@ -428,17 +583,29 @@ func TestOpenReportsParentPathThatIsAFile(t *testing.T) {
 	}
 }
 
-func TestOpenSupportsHashInDatabasePath(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "radar#copy.db")
-	store, err := database.Open(context.Background(), path)
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+func TestOpenSupportsReservedCharactersInDatabasePath(t *testing.T) {
+	names := []string{"radar#copy.db", "radar%copy.db", "radar copy.db"}
+	if runtime.GOOS != "windows" {
+		names = append(names, "radar?copy.db")
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("database file at requested path: %v", err)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			store, err := database.Open(context.Background(), path)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("database file at exact requested path: %v", err)
+			}
+			if info.IsDir() {
+				t.Fatalf("database path %q is a directory", path)
+			}
+		})
 	}
 }
 
@@ -478,6 +645,14 @@ func TestOpenCreatesParentConfiguresSQLiteAndMigrates(t *testing.T) {
 	}
 	if busyTimeout != 5000 {
 		t.Errorf("busy_timeout = %d, want 5000", busyTimeout)
+	}
+
+	var recursiveTriggers int
+	if err := store.SQL().QueryRow("PRAGMA recursive_triggers").Scan(&recursiveTriggers); err != nil {
+		t.Fatalf("query recursive_triggers: %v", err)
+	}
+	if recursiveTriggers != 1 {
+		t.Errorf("recursive_triggers = %d, want 1", recursiveTriggers)
 	}
 
 	var migrationCount int
