@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+
+# Go
+backend/radar
+backend/*.exe
+backend/coverage.out
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Runtime data
+backend/data/
+data/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
