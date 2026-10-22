@@ -166,6 +166,31 @@ func TestSchemaContractsAndIndexes(t *testing.T) {
 	}
 }
 
+func TestSiteSettingsKeyRejectsNull(t *testing.T) {
+	t.Parallel()
+
+	store := openTestDB(t)
+	for _, test := range []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "omitted key",
+			sql:  "INSERT INTO site_settings(json_value, updated_at) VALUES ('{}', '2026-10-23T00:00:00Z')",
+		},
+		{
+			name: "explicit null key",
+			sql:  "INSERT INTO site_settings(key, json_value, updated_at) VALUES (NULL, '{}', '2026-10-23T00:00:00Z')",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := store.SQL().Exec(test.sql); err == nil {
+				t.Error("site setting insert with NULL key succeeded, want NOT NULL error")
+			}
+		})
+	}
+}
+
 func TestIdentityAndJunctionUniquenessConstraints(t *testing.T) {
 	t.Parallel()
 

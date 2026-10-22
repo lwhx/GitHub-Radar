@@ -166,7 +166,7 @@ CREATE INDEX idx_admin_sessions_admin ON admin_sessions(admin_id, revoked_at, ex
 CREATE INDEX idx_admin_sessions_expires ON admin_sessions(expires_at);
 
 CREATE TABLE site_settings (
-    key TEXT PRIMARY KEY,
+    key TEXT NOT NULL PRIMARY KEY,
     json_value TEXT NOT NULL,
     updated_at TEXT NOT NULL CHECK ((updated_at GLOB '????-??-??T??:??:??Z' OR updated_at GLOB '????-??-??T??:??:??.*Z') AND updated_at NOT GLOB '*[^0-9TZ:.-]*' AND (length(updated_at) = 20 OR (length(updated_at) >= 22 AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*')) AND strftime('%Y-%m-%dT%H:%M:%S', updated_at) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%S', updated_at) = substr(updated_at, 1, 19))
 );
