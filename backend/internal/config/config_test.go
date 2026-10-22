@@ -90,6 +90,22 @@ func TestLoadProductionConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnknownAppEnv(t *testing.T) {
+	tests := []string{"prod", "Production", "production "}
+
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("APP_ENV", value)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "APP_ENV") {
+				t.Fatalf("Load() error = %v, want error containing %q", err, "APP_ENV")
+			}
+		})
+	}
+}
+
 func TestLoadUsesSecureCookieForHTTPSDevelopmentURL(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("PUBLIC_BASE_URL", "https://radar.example.com")

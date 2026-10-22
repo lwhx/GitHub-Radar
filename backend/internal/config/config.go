@@ -48,6 +48,12 @@ func Load() (Config, error) {
 	}
 	cfg.Port = port
 
+	switch cfg.AppEnv {
+	case "development", "production":
+	default:
+		return Config{}, fmt.Errorf("APP_ENV must be either development or production")
+	}
+
 	if _, err := time.LoadLocation(cfg.Timezone); err != nil {
 		return Config{}, fmt.Errorf("APP_TIMEZONE %q cannot be loaded: %w", cfg.Timezone, err)
 	}
