@@ -115,6 +115,53 @@ curl -i 'http://127.0.0.1:8080/api/v1/repos?q=agent&sort=stars_desc&page=1&limit
 curl -i http://127.0.0.1:8080/api/v1/repos/acme/agent-framework
 ```
 
+### `GET /api/v1/repos/{owner}/{repo}/stars?window=30d`
+
+真实 Star 时间序列。`window` 只接受 `7d`、`30d`、`90d`，缺省 `30d`，其他值返回 `400 INVALID_WINDOW`：
+
+```json
+{
+  "data": {
+    "repo": "acme/agent-framework",
+    "window": "30d",
+    "points": [{ "captured_at": "2026-10-23T06:00:00Z", "star_count": 120 }],
+    "sample_count": 1,
+    "history_available": false,
+    "method": "每次仓库详情同步写入一条真实 Star 快照（约 6 小时一轮）；此处不做采样、插值和估算，样本少于 2 个时 history_available=false",
+    "data_updated_at": "2026-10-23T06:00:00Z"
+  }
+}
+```
+
+- 数据只来自 `star_snapshots` 的真实采样，**不做插值、不估算、不补点**；
+- 窗口内样本少于 2 个时 `history_available=false`、`data_updated_at` 可能为 `null`，前端必须显示「数据不足」而不是 0；
+- 隐藏仓库与未知仓库一致返回 `404 REPO_NOT_FOUND`。
+
+### `GET /api/v1/repos/{owner}/{repo}/readme`
+
+按需抓取并缓存 README（24 小时 TTL），返回**已净化的 Markdown 原文**，由前端安全渲染：
+
+```json
+{
+  "data": {
+    "repo": "acme/agent-framework",
+    "status": "ok",
+    "format": "markdown",
+    "content": "# Agent Framework\n……",
+    "truncated": false,
+    "cached": true,
+    "stale": false,
+    "source": "github",
+    "fetched_at": "2026-10-24T10:00:00Z"
+  }
+}
+```
+
+- `status`：`ok` 表示有 README，`missing` 表示 GitHub 返回 404（同时写入 24 小时负缓存，避免反复请求），此时 `content` 为空并带 `note`；
+- 净化规则：删除 `<script>/<style>/<iframe>/<object>/<embed>` 块与事件属性，屏蔽 `javascript:`/`data:`/`vbscript:` 链接，长度截断到 60000 字符（`truncated=true`）；
+- 上游不可用且本地有旧副本时返回旧副本（`stale=true` 并带 `note`）；无副本时返回 `502 README_UNAVAILABLE`；
+- 未配置 README 服务时返回 `503 SERVICE_UNAVAILABLE`；隐藏仓库返回 `404 REPO_NOT_FOUND`。
+
 ### `GET /api/v1/categories`
 
 启用中的分类列表（按 `sort_order` 排序），`repo_count` 只统计可见（未隐藏）仓库。

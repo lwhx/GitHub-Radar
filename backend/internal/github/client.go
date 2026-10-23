@@ -109,6 +109,7 @@ func (client *Client) getJSON(ctx context.Context, path string, query url.Values
 type requestOptions struct {
 	etag             string
 	allowNotModified bool
+	accept           string
 }
 
 func (client *Client) getJSONURL(ctx context.Context, endpoint *url.URL, destination any) (ResponseMeta, error) {
@@ -143,7 +144,7 @@ func (client *Client) doGET(ctx context.Context, endpoint *url.URL, options requ
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub request: %w", err)
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Accept", acceptHeader(options))
 	request.Header.Set("X-GitHub-Api-Version", APIVersion)
 	request.Header.Set("User-Agent", defaultUserAgent)
 	if client.token != "" {

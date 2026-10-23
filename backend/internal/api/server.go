@@ -48,6 +48,7 @@ type Config struct {
 	Auth          authService
 	Credentials   credentialService
 	Scheduler     schedulerService
+	Readmes       readmeService
 	PublicBaseURL string
 	CookieSecure  bool
 	StaticDir     string
@@ -81,6 +82,8 @@ func New(config Config) http.Handler {
 	router.Get("/api/v1/stats", s.stats)
 	router.Get("/api/v1/repos", s.listRepos)
 	router.Get("/api/v1/repos/{owner}/{repo}", s.getRepo)
+	router.Get("/api/v1/repos/{owner}/{repo}/stars", s.getRepoStars)
+	router.Get("/api/v1/repos/{owner}/{repo}/readme", s.getRepoReadme)
 	router.Get("/api/v1/categories", s.listCategories)
 	router.Get("/api/v1/categories/{slug}", s.getCategory)
 	router.Get("/api/v1/rankings", s.listRankings)
