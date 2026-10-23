@@ -141,11 +141,16 @@ func (s *Service) Login(ctx context.Context, username, password string, ttl time
 		return Session{}, fmt.Errorf("parse administrator creation time: %w", err)
 	}
 
-	now := canonicalTime(s.now())
-	if remainder := ttl % time.Second; remainder != 0 {
-		ttl += time.Second - remainder
+	rawNow := s.now().UTC()
+	now := canonicalTime(rawNow)
+	absoluteExpiresAt := rawNow.Add(ttl)
+	expiresAt := canonicalTime(absoluteExpiresAt)
+	if absoluteExpiresAt.Nanosecond() != 0 {
+		expiresAt = expiresAt.Add(time.Second)
 	}
-	expiresAt := now.Add(ttl)
+	if maxExpiresAt := now.Add(maxSessionTTL); expiresAt.After(maxExpiresAt) {
+		expiresAt = maxExpiresAt
+	}
 	for attempt := 0; attempt < maxTokenRetries; attempt++ {
 		token, err := randomToken(s.random)
 		if err != nil {

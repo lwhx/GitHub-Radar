@@ -116,7 +116,7 @@ func TestLoginCreatesHashedSessionAndUpdatesLastLoginAtomically(t *testing.T) {
 			t.Errorf("%s token is not %d-byte unpadded base64url: %q, error=%v", name, tokenBytes, token, err)
 		}
 	}
-	if got := session.ExpiresAt.Format(timestampLayout); got != "2026-10-24T04:34:56Z" {
+	if got := session.ExpiresAt.Format(timestampLayout); got != "2026-10-24T04:34:57Z" {
 		t.Errorf("ExpiresAt = %q", got)
 	}
 
@@ -128,58 +128,75 @@ func TestLoginCreatesHashedSessionAndUpdatesLastLoginAtomically(t *testing.T) {
 	if sessionHash == session.Token || csrfHash == session.CSRFToken || len(sessionHash) != 64 || len(csrfHash) != 64 {
 		t.Errorf("stored token hashes are unsafe: session=%q csrf=%q", sessionHash, csrfHash)
 	}
-	if expiresAt != "2026-10-24T04:34:56Z" || createdAt != "2026-10-23T04:34:56Z" || lastLoginAt != createdAt {
+	if expiresAt != "2026-10-24T04:34:57Z" || createdAt != "2026-10-23T04:34:56Z" || lastLoginAt != createdAt {
 		t.Errorf("stored times = expires %q created %q last_login %q", expiresAt, createdAt, lastLoginAt)
 	}
 }
 
-func TestLoginRoundsPositiveSubsecondTTLUpToCanonicalSecond(t *testing.T) {
-	now := time.Date(2026, 10, 23, 0, 0, 0, 500_000_000, time.UTC)
-	canonicalNow := canonicalTime(now)
+func TestLoginPreservesSubsecondTTLAcrossSecondBoundary(t *testing.T) {
+	rawNow := time.Date(2026, 10, 23, 0, 0, 0, 999_000_000, time.UTC)
+	current := rawNow
+	service, store := testService(t, rawNow, bytes.Repeat([]byte{0x32}, 256))
+	service.now = func() time.Time { return current }
+	if _, err := service.CreateAdmin(context.Background(), "radar", "correct horse battery staple"); err != nil {
+		t.Fatalf("CreateAdmin() error = %v", err)
+	}
 
-	for _, ttl := range []time.Duration{time.Nanosecond, 500 * time.Millisecond, 999 * time.Millisecond} {
-		t.Run(ttl.String(), func(t *testing.T) {
-			service, store := testService(t, now, bytes.Repeat([]byte{0x32}, 256))
-			if _, err := service.CreateAdmin(context.Background(), "radar", "correct horse battery staple"); err != nil {
-				t.Fatalf("CreateAdmin() error = %v", err)
-			}
+	session, err := service.Login(context.Background(), "radar", "correct horse battery staple", 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	wantExpiresAt := time.Date(2026, 10, 23, 0, 0, 2, 0, time.UTC)
+	if !session.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("ExpiresAt = %v, want %v", session.ExpiresAt, wantExpiresAt)
+	}
+	var expiresAt string
+	if err := store.SQL().QueryRow("SELECT expires_at FROM admin_sessions").Scan(&expiresAt); err != nil {
+		t.Fatalf("query expires_at: %v", err)
+	}
+	if expiresAt != wantExpiresAt.Format(timestampLayout) {
+		t.Fatalf("stored expires_at = %q, want %q", expiresAt, wantExpiresAt.Format(timestampLayout))
+	}
 
-			session, err := service.Login(context.Background(), "radar", "correct horse battery staple", ttl)
-			if err != nil {
-				t.Fatalf("Login(ttl=%v) error = %v", ttl, err)
-			}
-			if _, err := service.Authenticate(context.Background(), session.Token); err != nil {
-				t.Fatalf("Authenticate() immediately after Login(ttl=%v) error = %v", ttl, err)
-			}
-
-			var expiresAt, createdAt string
-			if err := store.SQL().QueryRow("SELECT expires_at, created_at FROM admin_sessions").Scan(&expiresAt, &createdAt); err != nil {
-				t.Fatalf("query session times: %v", err)
-			}
-			storedExpiresAt, err := time.Parse(timestampLayout, expiresAt)
-			if err != nil {
-				t.Fatalf("parse expires_at %q: %v", expiresAt, err)
-			}
-			storedCreatedAt, err := time.Parse(timestampLayout, createdAt)
-			if err != nil {
-				t.Fatalf("parse created_at %q: %v", createdAt, err)
-			}
-			if !storedExpiresAt.After(storedCreatedAt) || !storedExpiresAt.After(canonicalNow) {
-				t.Errorf("expires_at = %v, want after created_at %v and canonical now %v", storedExpiresAt, storedCreatedAt, canonicalNow)
-			}
-			if storedExpiresAt.Location() != time.UTC || storedExpiresAt.Nanosecond() != 0 {
-				t.Errorf("expires_at = %v (%v), want UTC whole second", storedExpiresAt, storedExpiresAt.Location())
-			}
-			if got, want := session.ExpiresAt, canonicalNow.Add(time.Second); !got.Equal(want) || got.Location() != time.UTC || got.Nanosecond() != 0 {
-				t.Errorf("session ExpiresAt = %v (%v), want %v UTC", got, got.Location(), want)
-			}
-		})
+	current = current.Add(time.Millisecond)
+	if _, err := service.Authenticate(context.Background(), session.Token); err != nil {
+		t.Fatalf("Authenticate() 1ms after Login error = %v", err)
+	}
+	current = current.Add(499 * time.Millisecond)
+	if _, err := service.Authenticate(context.Background(), session.Token); err != nil {
+		t.Fatalf("Authenticate() 500ms after Login error = %v", err)
+	}
+	current = session.ExpiresAt
+	if _, err := service.Authenticate(context.Background(), session.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Authenticate() at expires_at error = %v, want ErrUnauthenticated", err)
+	}
+	current = session.ExpiresAt.Add(time.Nanosecond)
+	if _, err := service.Authenticate(context.Background(), session.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Authenticate() after expires_at error = %v, want ErrUnauthenticated", err)
 	}
 }
 
-func TestLoginKeepsMaximumTTLAtExactlyThirtyDays(t *testing.T) {
-	now := time.Date(2026, 10, 23, 0, 0, 0, 500_000_000, time.UTC)
-	service, _ := testService(t, now, bytes.Repeat([]byte{0x3c}, 256))
+func TestLoginDoesNotRoundExactAbsoluteExpiryPastNextSecond(t *testing.T) {
+	rawNow := time.Date(2026, 10, 23, 0, 0, 0, 999_999_999, time.UTC)
+	service, _ := testService(t, rawNow, bytes.Repeat([]byte{0x3d}, 256))
+	if _, err := service.CreateAdmin(context.Background(), "radar", "correct horse battery staple"); err != nil {
+		t.Fatalf("CreateAdmin() error = %v", err)
+	}
+
+	session, err := service.Login(context.Background(), "radar", "correct horse battery staple", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if got, want := session.ExpiresAt, rawNow.Add(time.Nanosecond); !got.Equal(want) {
+		t.Errorf("ExpiresAt = %v, want exact second boundary %v", got, want)
+	}
+}
+
+func TestLoginCapsMaximumTTLAtThirtyDaysFromCanonicalTime(t *testing.T) {
+	rawNow := time.Date(2026, 10, 23, 0, 0, 0, 500_000_000, time.UTC)
+	current := rawNow
+	service, _ := testService(t, rawNow, bytes.Repeat([]byte{0x3c}, 256))
+	service.now = func() time.Time { return current }
 	if _, err := service.CreateAdmin(context.Background(), "radar", "correct horse battery staple"); err != nil {
 		t.Fatalf("CreateAdmin() error = %v", err)
 	}
@@ -188,8 +205,20 @@ func TestLoginKeepsMaximumTTLAtExactlyThirtyDays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login(ttl=%v) error = %v", maxSessionTTL, err)
 	}
-	if got, want := session.ExpiresAt, canonicalTime(now).Add(maxSessionTTL); !got.Equal(want) {
-		t.Errorf("ExpiresAt = %v, want exact maximum boundary %v", got, want)
+	wantExpiresAt := canonicalTime(rawNow).Add(maxSessionTTL)
+	if !session.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("ExpiresAt = %v, want capped maximum boundary %v", session.ExpiresAt, wantExpiresAt)
+	}
+	if !session.ExpiresAt.Before(rawNow.Add(maxSessionTTL)) {
+		t.Fatalf("ExpiresAt = %v, want before uncapped absolute expiry %v", session.ExpiresAt, rawNow.Add(maxSessionTTL))
+	}
+	current = session.ExpiresAt.Add(-time.Nanosecond)
+	if _, err := service.Authenticate(context.Background(), session.Token); err != nil {
+		t.Fatalf("Authenticate() immediately before capped expires_at error = %v", err)
+	}
+	current = session.ExpiresAt
+	if _, err := service.Authenticate(context.Background(), session.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Authenticate() at capped expires_at error = %v, want ErrUnauthenticated", err)
 	}
 }
 
