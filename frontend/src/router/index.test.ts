@@ -19,3 +19,7 @@ describe('public repository routes', () => {
 it('registers the categories page', () => {
   expect(router.resolve('/categories').name).toBe('categories')
 })
+
+it('registers the favorites page', () => {
+  expect(router.resolve('/favorites').name).toBe('favorites')
+})

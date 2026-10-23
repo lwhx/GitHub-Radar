@@ -4,6 +4,7 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { apiFetch, ApiError } from '../api/client'
 import type { PublicRepo } from '../api/types'
+import { isFavorited, toggleFavorite } from '../stores/favorites'
 
 const route = useRoute()
 const repo = ref<PublicRepo | null>(null)
@@ -34,6 +35,18 @@ async function load() {
 }
 
 watch(() => [route.params.owner, route.params.repo], load, { immediate: true })
+
+function favoritePayload(current: PublicRepo) {
+  return {
+    full_name: current.full_name,
+    owner: current.owner,
+    name: current.name,
+    html_url: current.html_url,
+    description: current.description,
+    language: current.language,
+    stars_count: current.stars_count,
+  }
+}
 </script>
 
 
@@ -56,7 +69,17 @@ watch(() => [route.params.owner, route.params.repo], load, { immediate: true })
       <section class="rounded-lg border border-line bg-card p-6">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <h1 class="text-xl font-semibold">{{ repo.full_name }}</h1>
-          <a :href="repo.html_url" class="text-sm underline hover:text-accent" rel="noopener noreferrer">在 GitHub 打开</a>
+          <div class="flex items-center gap-3 text-sm">
+            <button
+              type="button"
+              class="underline hover:text-accent"
+              :aria-pressed="isFavorited(repo.full_name)"
+              @click="toggleFavorite(favoritePayload(repo))"
+            >
+              {{ isFavorited(repo.full_name) ? '★ 已收藏' : '☆ 收藏' }}
+            </button>
+            <a :href="repo.html_url" class="underline hover:text-accent" rel="noopener noreferrer">在 GitHub 打开</a>
+          </div>
         </div>
         <p v-if="repo.description" class="mt-2 text-sm text-muted">{{ repo.description }}</p>
         <div class="mt-4 grid grid-cols-3 gap-4">

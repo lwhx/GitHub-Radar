@@ -4,6 +4,7 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { apiFetch, ApiError } from '../api/client'
 import type { PublicRepo, ReposListMeta } from '../api/types'
+import { isFavorited, toggleFavorite } from '../stores/favorites'
 
 const items = ref<PublicRepo[]>([])
 const meta = ref<ReposListMeta | null>(null)
@@ -60,6 +61,18 @@ function clearCategory() {
   category.value = ''
   page.value = 1
   void load()
+}
+
+function favoritePayload(item: PublicRepo) {
+  return {
+    full_name: item.full_name,
+    owner: item.owner,
+    name: item.name,
+    html_url: item.html_url,
+    description: item.description,
+    language: item.language,
+    stars_count: item.stars_count,
+  }
 }
 
 onMounted(load)
@@ -121,6 +134,14 @@ onMounted(load)
                 {{ item.full_name }}
               </RouterLink>
               <span class="text-sm text-muted">⭐ {{ item.stars_count }}</span>
+              <button
+                type="button"
+                class="text-sm text-muted hover:text-accent"
+                :aria-pressed="isFavorited(item.full_name)"
+                @click="toggleFavorite(favoritePayload(item))"
+              >
+                {{ isFavorited(item.full_name) ? '★ 已收藏' : '☆ 收藏' }}
+              </button>
             </div>
             <p v-if="item.description" class="mt-1 text-sm text-muted">{{ item.description }}</p>
             <p class="mt-2 flex flex-wrap gap-3 text-xs text-muted">

@@ -75,4 +75,17 @@ describe('RepoDetailPage', () => {
     const back = wrapper.findAll('a').find((a) => a.attributes('href')?.includes('/repos'))
     expect(back).toBeTruthy()
   })
+
+  it('toggles favorite from the detail header', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(fakeResponse(200, { data: sampleRepo })))
+
+    const wrapper = await mountAtRoute('/repos/acme/rocket')
+    const favorite = wrapper.findAll('button').find((button) => button.text().includes('收藏'))
+    expect(favorite).toBeTruthy()
+    await favorite!.trigger('click')
+
+    const stored = JSON.parse(window.localStorage.getItem('radar-favorites') ?? '[]')
+    expect(stored).toHaveLength(1)
+    expect(stored[0].full_name).toBe('acme/rocket')
+  })
 })

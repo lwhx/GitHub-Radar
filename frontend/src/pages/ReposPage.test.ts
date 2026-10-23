@@ -140,3 +140,17 @@ it('applies the category filter from the route query', async () => {
 
   expect(String(fetchMock.mock.calls[0]?.[0])).toContain('category=ai')
 })
+
+it('toggles favorite state from the list card', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(fakeResponse(200, { data: sampleRepos })))
+
+  const wrapper = mount(ReposPage, { global: { plugins: [router] } })
+  await flushPromises()
+  const favorite = wrapper.findAll('button').find((button) => button.text().includes('收藏'))
+  expect(favorite).toBeTruthy()
+  await favorite!.trigger('click')
+
+  const stored = JSON.parse(window.localStorage.getItem('radar-favorites') ?? '[]')
+  expect(stored).toHaveLength(1)
+  expect(stored[0].full_name).toBe('beta/two')
+})
