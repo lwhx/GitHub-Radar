@@ -40,6 +40,17 @@ export interface PublicStats {
   data_updated_at: string | null
 }
 
+export interface PublicCategory {
+  slug: string
+  title: string
+  description: string | null
+  repo_count: number
+}
+
+export interface CategoriesResponse {
+  items: PublicCategory[]
+}
+
 export interface AdminOverview {
   repository_count: number
   snapshot_count: number

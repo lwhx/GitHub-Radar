@@ -49,6 +49,13 @@ const publicRepoColumns = `full_name, owner, name, html_url, homepage_url, descr
 	topics_json, stars_count, forks_count, open_issues_count, is_fork, is_archived,
 	github_created_at, github_updated_at, pushed_at, first_seen_at, last_synced_at`
 
+type publicCategory struct {
+	Slug        string  `json:"slug"`
+	Title       string  `json:"title"`
+	Description *string `json:"description"`
+	RepoCount   int     `json:"repo_count"`
+}
+
 func nullStringPtr(value sql.NullString) *string {
 	if !value.Valid {
 		return nil
@@ -125,6 +132,60 @@ func (s *server) getRepo(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, repo)
 }
 
+func (s *server) listCategories(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.config.DB.SQL().Query(`
+		SELECT c.slug, c.title, c.description,
+		       (SELECT COUNT(*) FROM repo_categories rc
+		        JOIN repositories vis ON vis.id = rc.repo_id
+		        WHERE rc.category_id = c.id AND vis.is_hidden = 0) AS repo_count
+		FROM categories c
+		WHERE c.enabled = 1
+		ORDER BY c.sort_order, c.id`)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "failed to list categories")
+		return
+	}
+	defer rows.Close()
+	items := []publicCategory{}
+	for rows.Next() {
+		var category publicCategory
+		var description sql.NullString
+		if err := rows.Scan(&category.Slug, &category.Title, &description, &category.RepoCount); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "internal_error", "failed to read categories")
+			return
+		}
+		category.Description = nullStringPtr(description)
+		items = append(items, category)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "failed to read categories")
+		return
+	}
+	writeData(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *server) getCategory(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	var category publicCategory
+	var categoryID int64
+	var description sql.NullString
+	err := s.config.DB.SQL().QueryRow(
+		`SELECT id, slug, title, description FROM categories WHERE slug = ? COLLATE NOCASE AND enabled = 1`, slug,
+	).Scan(&categoryID, &category.Slug, &category.Title, &description)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "category_not_found", "category not found")
+		return
+	}
+	category.Description = nullStringPtr(description)
+	var repoCount int
+	_ = s.config.DB.SQL().QueryRow(`
+		SELECT COUNT(*) FROM repo_categories rc
+		JOIN repositories vis ON vis.id = rc.repo_id
+		WHERE rc.category_id = ? AND vis.is_hidden = 0`, categoryID).Scan(&repoCount)
+	category.RepoCount = repoCount
+	writeData(w, http.StatusOK, category)
+}
+
 func (s *server) listRepos(w http.ResponseWriter, r *http.Request) {
 	page, limit, ok := parsePagination(w, r)
 	if !ok {
@@ -142,6 +203,18 @@ func (s *server) listRepos(w http.ResponseWriter, r *http.Request) {
 		pattern := "%" + escapeLike(q) + "%"
 		where += " AND (full_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')"
 		args = append(args, pattern, pattern)
+	}
+	if categorySlug := strings.TrimSpace(r.URL.Query().Get("category")); categorySlug != "" {
+		var categoryID int64
+		err := store.QueryRow(
+			`SELECT id FROM categories WHERE slug = ? COLLATE NOCASE AND enabled = 1`, categorySlug,
+		).Scan(&categoryID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid_category", "unknown category")
+			return
+		}
+		where += " AND EXISTS (SELECT 1 FROM repo_categories rc WHERE rc.repo_id = repositories.id AND rc.category_id = ?)"
+		args = append(args, categoryID)
 	}
 	var total int
 	if err := store.QueryRow("SELECT COUNT(*) FROM repositories WHERE "+where, args...).Scan(&total); err != nil {

@@ -156,6 +156,128 @@ func TestListReposPaginatesAndCapsLimit(t *testing.T) {
 	}
 }
 
+func seedCategory(t *testing.T, store *db.DB, id int64, slug, title string, sortOrder int, enabled bool) {
+	t.Helper()
+	enabledFlag := 0
+	if enabled {
+		enabledFlag = 1
+	}
+	if _, err := store.SQL().Exec(
+		`INSERT INTO categories (id, slug, title, description, sort_order, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, slug, title, slug+" 分类", sortOrder, enabledFlag); err != nil {
+		t.Fatalf("seed category %s: %v", slug, err)
+	}
+}
+
+func linkRepoCategory(t *testing.T, store *db.DB, repoGithubID, categoryID int64) {
+	t.Helper()
+	if _, err := store.SQL().Exec(
+		`INSERT INTO repo_categories (repo_id, category_id, is_primary, source)
+		 SELECT id, ?, 1, 'manual' FROM repositories WHERE github_id = ?`, categoryID, repoGithubID); err != nil {
+		t.Fatalf("link repo %d to category %d: %v", repoGithubID, categoryID, err)
+	}
+}
+
+func TestListCategoriesReturnsEnabledWithVisibleRepoCounts(t *testing.T) {
+	store := newTestStore(t)
+	seedPublicRepo(t, store, 701, "acme", "ai-one", 30)
+	seedPublicRepo(t, store, 702, "acme", "ai-two", 20)
+	seedPublicRepo(t, store, 703, "acme", "hidden-ai", 99)
+	if _, err := store.SQL().Exec(`UPDATE repositories SET is_hidden = 1 WHERE github_id = 703`); err != nil {
+		t.Fatal(err)
+	}
+	seedCategory(t, store, 11, "ai", "AI 与大模型", 1, true)
+	seedCategory(t, store, 12, "devops", "DevOps 工具", 2, true)
+	seedCategory(t, store, 13, "legacy", "已停用分类", 0, false)
+	linkRepoCategory(t, store, 701, 11)
+	linkRepoCategory(t, store, 702, 11)
+	linkRepoCategory(t, store, 703, 11)
+	handler := newTestHandler(t, store)
+
+	recorder := request(t, handler, http.MethodGet, "/api/v1/categories")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Items []struct {
+				Slug      string `json:"slug"`
+				Title     string `json:"title"`
+				RepoCount int    `json:"repo_count"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Data.Items) != 2 {
+		t.Fatalf("items = %d, want 2 (disabled category excluded)", len(payload.Data.Items))
+	}
+	if payload.Data.Items[0].Slug != "ai" || payload.Data.Items[0].RepoCount != 2 {
+		t.Fatalf("first item = %+v, want ai with 2 visible repos", payload.Data.Items[0])
+	}
+	if payload.Data.Items[1].Slug != "devops" || payload.Data.Items[1].RepoCount != 0 {
+		t.Fatalf("second item = %+v, want devops with 0 repos", payload.Data.Items[1])
+	}
+}
+
+func TestGetCategoryReturnsDetailAndNotFoundForUnknown(t *testing.T) {
+	store := newTestStore(t)
+	seedCategory(t, store, 21, "ai", "AI 与大模型", 1, true)
+	handler := newTestHandler(t, store)
+
+	found := request(t, handler, http.MethodGet, "/api/v1/categories/ai")
+	if found.Code != http.StatusOK {
+		t.Fatalf("status = %d", found.Code)
+	}
+	var payload struct {
+		Data struct {
+			Slug        string  `json:"slug"`
+			Title       string  `json:"title"`
+			Description *string `json:"description"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(found.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Data.Slug != "ai" || payload.Data.Title != "AI 与大模型" || payload.Data.Description == nil {
+		t.Fatalf("detail = %+v", payload.Data)
+	}
+
+	missing := request(t, handler, http.MethodGet, "/api/v1/categories/ghost")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown slug status = %d, want 404", missing.Code)
+	}
+}
+
+func TestListReposFiltersByCategorySlug(t *testing.T) {
+	store := newTestStore(t)
+	seedPublicRepo(t, store, 801, "acme", "in-ai", 30)
+	seedPublicRepo(t, store, 802, "acme", "outside", 20)
+	seedPublicRepo(t, store, 803, "acme", "hidden-in-ai", 99)
+	if _, err := store.SQL().Exec(`UPDATE repositories SET is_hidden = 1 WHERE github_id = 803`); err != nil {
+		t.Fatal(err)
+	}
+	seedCategory(t, store, 31, "ai", "AI 与大模型", 1, true)
+	linkRepoCategory(t, store, 801, 31)
+	linkRepoCategory(t, store, 803, 31)
+	handler := newTestHandler(t, store)
+
+	filtered := request(t, handler, http.MethodGet, "/api/v1/repos?category=ai")
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("status = %d", filtered.Code)
+	}
+	items, meta := decodeReposList(t, filtered)
+	if meta.Total != 1 || len(items) != 1 || items[0].FullName != "acme/in-ai" {
+		t.Fatalf("items = %+v meta = %+v, want only acme/in-ai", items, meta)
+	}
+
+	unknown := request(t, handler, http.MethodGet, "/api/v1/repos?category=ghost")
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("unknown category status = %d, want 400", unknown.Code)
+	}
+}
+
 func TestGetRepoReturnsDetailForOwnerAndName(t *testing.T) {
 	store := newTestStore(t)
 	seedPublicRepo(t, store, 601, "acme", "rocket", 77)

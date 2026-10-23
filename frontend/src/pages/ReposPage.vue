@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 
 import { apiFetch, ApiError } from '../api/client'
 import type { PublicRepo, ReposListMeta } from '../api/types'
@@ -12,6 +12,8 @@ const error = ref('')
 const query = ref('')
 const sort = ref('stars_desc')
 const page = ref(1)
+const route = useRoute()
+const category = ref(typeof route.query.category === 'string' ? route.query.category : '')
 
 const sortOptions = [
   { value: 'stars_desc', label: 'Star 最多' },
@@ -27,6 +29,7 @@ async function load() {
     const params = new URLSearchParams()
     params.set('page', String(page.value))
     if (query.value.trim() !== '') params.set('q', query.value.trim())
+    if (category.value !== '') params.set('category', category.value)
     params.set('sort', sort.value)
     const response = await apiFetch<{ items: PublicRepo[]; meta: ReposListMeta }>(`/api/v1/repos?${params.toString()}`)
     items.value = response.items
@@ -50,6 +53,12 @@ function changeSort() {
 
 function goToPage(target: number) {
   page.value = target
+  void load()
+}
+
+function clearCategory() {
+  category.value = ''
+  page.value = 1
   void load()
 }
 
@@ -84,6 +93,11 @@ onMounted(load)
     <p v-if="error" role="alert" class="rounded-lg border border-danger/40 bg-card p-4 text-sm text-danger">
       {{ error }}
       <button type="button" class="ml-2 underline" @click="load">重试</button>
+    </p>
+
+    <p v-if="category" class="text-sm text-muted">
+      分类过滤：{{ category }}
+      <button type="button" class="underline" @click="clearCategory">清除</button>
     </p>
 
     <div v-if="loading" class="flex flex-col gap-3" aria-busy="true" aria-label="加载中">

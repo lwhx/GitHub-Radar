@@ -81,6 +81,8 @@ func New(config Config) http.Handler {
 	router.Get("/api/v1/stats", s.stats)
 	router.Get("/api/v1/repos", s.listRepos)
 	router.Get("/api/v1/repos/{owner}/{repo}", s.getRepo)
+	router.Get("/api/v1/categories", s.listCategories)
+	router.Get("/api/v1/categories/{slug}", s.getCategory)
 	router.Post("/api/v1/admin/auth/login", s.login)
 	router.Get("/api/v1/admin/auth/session", s.session)
 	router.Post("/api/v1/admin/auth/logout", s.logout)

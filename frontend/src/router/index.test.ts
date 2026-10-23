@@ -15,3 +15,7 @@ describe('public repository routes', () => {
     expect(router.resolve('/repos/acme/rocket').name).toBe('repo-detail')
   })
 })
+
+it('registers the categories page', () => {
+  expect(router.resolve('/categories').name).toBe('categories')
+})

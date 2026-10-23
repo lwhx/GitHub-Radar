@@ -128,3 +128,15 @@ describe('ReposPage', () => {
     expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('page=2')
   })
 })
+
+it('applies the category filter from the route query', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(fakeResponse(200, { data: sampleRepos }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await router.push('/repos?category=ai')
+  await router.isReady()
+  const wrapper = mount(ReposPage, { global: { plugins: [router] } })
+  await flushPromises()
+
+  expect(String(fetchMock.mock.calls[0]?.[0])).toContain('category=ai')
+})

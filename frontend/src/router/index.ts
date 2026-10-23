@@ -6,6 +6,7 @@ import AdminCredentialsPage from '../pages/AdminCredentialsPage.vue'
 import AdminJobsPage from '../pages/AdminJobsPage.vue'
 import AdminLoginPage from '../pages/AdminLoginPage.vue'
 import AdminOverviewPage from '../pages/AdminOverviewPage.vue'
+import CategoriesPage from '../pages/CategoriesPage.vue'
 import HomePage from '../pages/HomePage.vue'
 import NotFoundPage from '../pages/NotFoundPage.vue'
 import RepoDetailPage from '../pages/RepoDetailPage.vue'
@@ -28,6 +29,7 @@ const router = createRouter({
         { path: '', name: 'home', component: HomePage },
         { path: 'repos', name: 'repos', component: ReposPage },
         { path: 'repos/:owner/:repo', name: 'repo-detail', component: RepoDetailPage },
+        { path: 'categories', name: 'categories', component: CategoriesPage },
         { path: 'admin/login', name: 'admin-login', component: AdminLoginPage },
       ],
     },

@@ -115,6 +115,26 @@ curl -i 'http://127.0.0.1:8080/api/v1/repos?q=agent&sort=stars_desc&page=1&limit
 curl -i http://127.0.0.1:8080/api/v1/repos/acme/agent-framework
 ```
 
+### `GET /api/v1/categories`
+
+启用中的分类列表（按 `sort_order` 排序），`repo_count` 只统计可见（未隐藏）仓库。
+
+```json
+{
+  "data": {
+    "items": [
+      { "slug": "ai", "title": "AI 与大模型", "description": "大模型相关项目", "repo_count": 12 }
+    ]
+  }
+}
+```
+
+### `GET /api/v1/categories/{slug}`
+
+单个分类详情；未知或停用的分类返回 `404 CATEGORY_NOT_FOUND`。
+
+> 列表接口支持 `category=<slug>` 参数：按分类过滤仓库；未知或停用分类返回 `400 INVALID_CATEGORY`。
+
 ## 认证接口
 
 ### `POST /api/v1/admin/auth/login`
