@@ -317,6 +317,36 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 
 不存在返回 `404 NOT_FOUND`；需要合法 Origin、会话和 CSRF，审计日志记录 `admin.credential.delete`。后台界面在删除前必须二次确认。
 
+### `GET /api/v1/admin/categories`
+
+返回全部分类（**包含已停用**）及可见仓库数量，需要管理员会话：
+
+```json
+{ "data": { "items": [ { "id": 1, "slug": "ai", "title": "AI 与大模型", "sort_order": 1, "enabled": true, "repo_count": 12 } ] } }
+```
+
+公开接口 `GET /api/v1/categories` 只返回启用分类；本接口是运维视图。
+
+### `POST /api/v1/admin/categories`
+
+新建分类，需要合法 Origin、会话和 CSRF：
+
+```json
+{ "slug": "ai-agents", "title": "AI Agent", "description": "智能体生态", "sort_order": 5, "enabled": true }
+```
+
+- `slug` 为 2–64 位小写字母、数字或连字符，不可首尾连字符，创建后**不可修改**（公开页面以 slug 为路径）；
+- `title` 1–80 字、`description` ≤ 500 字，非法返回 `400 INVALID_CATEGORY`；
+- slug 已存在返回 `409 CONFLICT`；成功返回 `201` 及完整分类；审计 `admin.category.create`。
+
+### `PATCH /api/v1/admin/categories/{id}`
+
+局部更新 `title` / `description` / `sort_order` / `enabled`（至少一个字段），成功返回更新后的分类；空载荷 `400 INVALID_REQUEST`，不存在 `404 NOT_FOUND`；审计 `admin.category.update`。请求体不接受 `slug`（未知字段直接 `400`）。
+
+### `DELETE /api/v1/admin/categories/{id}`
+
+永久删除分类，`repo_categories` 与 `category_rules` 随外键级联删除（仓库本身不受影响，只是不再归属该分类）。不存在 `404 NOT_FOUND`；需要二次确认后调用；审计 `admin.category.delete`。
+
 ### `GET /api/v1/admin/jobs`
 
 返回采集任务的周期、下次运行时间与当前租约。默认包含：
