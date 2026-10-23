@@ -18,6 +18,8 @@ const timestampLayout = "2006-01-02T15:04:05Z"
 var (
 	ErrInvalidLabel = errors.New("invalid credential label")
 	ErrInvalidToken = errors.New("invalid GitHub token")
+	// ErrNotFound 表示凭据不存在（已被删除或 id 非法）。
+	ErrNotFound = errors.New("credential not found")
 )
 
 type githubClient interface {
@@ -302,4 +304,88 @@ func tokenHint(value string) string {
 
 func formatTime(value time.Time) string {
 	return value.UTC().Truncate(time.Second).Format(timestampLayout)
+}
+
+// Test 用已存储的 Token 重新向 GitHub 验证身份与配额，并刷新记录。
+// Token 已被撤销或换号时返回错误，由调用方区分 4xx/5xx。
+func (service *Service) Test(ctx context.Context, credentialID int64) (Credential, error) {
+	var ciphertext string
+	err := service.db.QueryRowContext(ctx, `SELECT token_ciphertext FROM github_credentials WHERE id = ?`, credentialID).Scan(&ciphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Credential{}, ErrNotFound
+	}
+	if err != nil {
+		return Credential{}, fmt.Errorf("load GitHub credential: %w", err)
+	}
+	token, err := service.cipher.Decrypt(ciphertext)
+	if err != nil {
+		return Credential{}, fmt.Errorf("decrypt GitHub credential: %w", err)
+	}
+	client, err := service.newClient(token)
+	if err != nil {
+		return Credential{}, fmt.Errorf("create GitHub client: %w", err)
+	}
+	user, _, err := client.GetAuthenticatedUser(ctx)
+	if err != nil {
+		return Credential{}, fmt.Errorf("verify GitHub credential: %w", err)
+	}
+	limits, _, err := client.GetRateLimitStatus(ctx)
+	if err != nil {
+		return Credential{}, fmt.Errorf("read GitHub rate limits: %w", err)
+	}
+	now := service.now().UTC().Truncate(time.Second)
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Credential{}, fmt.Errorf("begin GitHub credential re-check: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE github_credentials
+		SET auth_identity = ?, auth_login = ?, status = 'active', last_checked_at = ?, updated_at = ?
+		WHERE id = ?`, fmt.Sprint(user.ID), user.Login, formatTime(now), formatTime(now), credentialID); err != nil {
+		return Credential{}, fmt.Errorf("refresh GitHub credential: %w", err)
+	}
+	for resource, limit := range map[string]github.RateLimitResource{"core": limits.Resources.Core, "search": limits.Resources.Search} {
+		resetAt := limit.ResetAt()
+		if resetAt.IsZero() {
+			return Credential{}, fmt.Errorf("GitHub %s rate limit reset is missing", resource)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO api_rate_limits
+			(credential_id, resource, limit_value, remaining, reset_at, updated_at, used)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(credential_id, resource) DO UPDATE SET
+				limit_value = excluded.limit_value, remaining = excluded.remaining,
+				reset_at = excluded.reset_at, updated_at = excluded.updated_at, used = excluded.used`,
+			credentialID, resource, limit.Limit, limit.Remaining, formatTime(resetAt), formatTime(now), limit.Used); err != nil {
+			return Credential{}, fmt.Errorf("refresh GitHub %s rate limit: %w", resource, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Credential{}, fmt.Errorf("commit GitHub credential re-check: %w", err)
+	}
+	items, err := service.List(ctx)
+	if err != nil {
+		return Credential{}, err
+	}
+	for _, item := range items {
+		if item.ID == credentialID {
+			return item.Credential, nil
+		}
+	}
+	return Credential{}, ErrNotFound
+}
+
+// Delete 永久删除凭据；api_rate_limits 随外键级联删除。
+func (service *Service) Delete(ctx context.Context, credentialID int64) error {
+	result, err := service.db.ExecContext(ctx, `DELETE FROM github_credentials WHERE id = ?`, credentialID)
+	if err != nil {
+		return fmt.Errorf("delete GitHub credential: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check deleted GitHub credential: %w", err)
+	}
+	if deleted == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

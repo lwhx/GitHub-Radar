@@ -13,7 +13,7 @@ export class ApiError extends Error {
 }
 
 export interface ApiFetchOptions {
-  method?: 'GET' | 'POST' | 'PATCH'
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?: unknown
   csrfToken?: string
 }

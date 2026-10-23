@@ -23,6 +23,8 @@ type credentialService interface {
 	Create(context.Context, credentials.CreateInput) (credentials.Credential, error)
 	SetEnabled(context.Context, int64, bool) error
 	Usable(context.Context, string) (credentials.UsableCredential, error)
+	Test(context.Context, int64) (credentials.Credential, error)
+	Delete(context.Context, int64) error
 }
 
 // schedulerService is the collection job surface used by the admin API.
@@ -194,6 +196,75 @@ func (s *server) updateCredential(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), &admin.ID, "admin.credential.update", strconv.FormatInt(id, 10), "success")
 	w.Header().Set("Cache-Control", "no-store")
 	writeData(w, http.StatusOK, map[string]any{"id": id, "enabled": *payload.Enabled})
+}
+
+func (s *server) testCredential(w http.ResponseWriter, r *http.Request) {
+	if !s.validOrigin(r) {
+		writeError(w, r, http.StatusForbidden, "INVALID_ORIGIN", "Request origin is not allowed")
+		return
+	}
+	admin, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if !s.requireCSRF(w, r) {
+		return
+	}
+	if s.credentialsUnavailable(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	credential, err := s.config.Credentials.Test(r.Context(), id)
+	if err != nil {
+		s.audit(r.Context(), &admin.ID, "admin.credential.test", strconv.FormatInt(id, 10), "failure")
+		if errors.Is(err, credentials.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Credential not found")
+			return
+		}
+		s.config.Logger.Error("re-check GitHub credential", "request_id", requestID(r.Context()), "error", err)
+		writeError(w, r, http.StatusBadGateway, "GITHUB_VERIFICATION_FAILED", "GitHub rejected or did not answer the credential check")
+		return
+	}
+	s.audit(r.Context(), &admin.ID, "admin.credential.test", credential.AuthLogin, "success")
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, http.StatusOK, map[string]any{"credential": credential})
+}
+
+func (s *server) deleteCredential(w http.ResponseWriter, r *http.Request) {
+	if !s.validOrigin(r) {
+		writeError(w, r, http.StatusForbidden, "INVALID_ORIGIN", "Request origin is not allowed")
+		return
+	}
+	admin, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if !s.requireCSRF(w, r) {
+		return
+	}
+	if s.credentialsUnavailable(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.config.Credentials.Delete(r.Context(), id); err != nil {
+		s.audit(r.Context(), &admin.ID, "admin.credential.delete", strconv.FormatInt(id, 10), "failure")
+		if errors.Is(err, credentials.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Credential not found")
+			return
+		}
+		s.config.Logger.Error("delete GitHub credential", "request_id", requestID(r.Context()), "error", err)
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to delete credential")
+		return
+	}
+	s.audit(r.Context(), &admin.ID, "admin.credential.delete", strconv.FormatInt(id, 10), "success")
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
 }
 
 func (s *server) listJobs(w http.ResponseWriter, r *http.Request) {

@@ -14,9 +14,12 @@ import (
 )
 
 type fakeCredentials struct {
-	created  []credentials.CreateInput
-	enabled  map[int64]bool
-	failWith error
+	created    []credentials.CreateInput
+	enabled    map[int64]bool
+	tested     []int64
+	deleted    []int64
+	missingIDs map[int64]bool
+	failWith   error
 }
 
 func (fake *fakeCredentials) List(context.Context) ([]credentials.CredentialDetail, error) {
@@ -41,6 +44,22 @@ func (fake *fakeCredentials) SetEnabled(_ context.Context, id int64, enabled boo
 
 func (fake *fakeCredentials) Usable(context.Context, string) (credentials.UsableCredential, error) {
 	return credentials.UsableCredential{}, credentials.ErrNoCredential
+}
+
+func (fake *fakeCredentials) Test(_ context.Context, id int64) (credentials.Credential, error) {
+	if fake.missingIDs[id] {
+		return credentials.Credential{}, credentials.ErrNotFound
+	}
+	fake.tested = append(fake.tested, id)
+	return credentials.Credential{ID: id, Label: "primary", AuthIdentity: "8", AuthLogin: "hubot", TokenHint: "…1234", Enabled: true, Status: "active"}, nil
+}
+
+func (fake *fakeCredentials) Delete(_ context.Context, id int64) error {
+	if fake.missingIDs[id] {
+		return credentials.ErrNotFound
+	}
+	fake.deleted = append(fake.deleted, id)
+	return nil
 }
 
 type fakeScheduler struct {

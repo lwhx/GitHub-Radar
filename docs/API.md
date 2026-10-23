@@ -291,6 +291,32 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 
 成功返回 `{ "data": { "id": 1, "enabled": false } }`；不存在返回 `404 NOT_FOUND`。
 
+### `POST /api/v1/admin/credentials/{id}/test`
+
+用已保存的 Token 重新向 GitHub 验证身份与配额（不接收请求体），成功后刷新 `auth_identity`、`auth_login`、`last_checked_at` 与 core/search 配额：
+
+```json
+{
+  "data": {
+    "credential": { "id": 1, "label": "主账号", "auth_login": "octocat", "status": "active" }
+  }
+}
+```
+
+- 不存在返回 `404 NOT_FOUND`；
+- Token 已被撤销或 GitHub 无法验证返回 `502 GITHUB_VERIFICATION_FAILED`；
+- 需要合法 Origin、会话和 CSRF，操作写入审计日志 `admin.credential.test`。
+
+### `DELETE /api/v1/admin/credentials/{id}`
+
+永久删除凭据，关联配额记录随外键级联删除：
+
+```json
+{ "data": { "id": 1, "deleted": true } }
+```
+
+不存在返回 `404 NOT_FOUND`；需要合法 Origin、会话和 CSRF，审计日志记录 `admin.credential.delete`。后台界面在删除前必须二次确认。
+
 ### `GET /api/v1/admin/jobs`
 
 返回采集任务的周期、下次运行时间与当前租约。默认包含：

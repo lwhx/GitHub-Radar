@@ -72,6 +72,40 @@ function rateLimit(credential: GitHubCredential, resource: string): RateLimitSna
   return credential.rate_limits?.find((item) => item.resource === resource)
 }
 
+async function testCredential(credential: GitHubCredential) {
+  error.value = ''
+  notice.value = ''
+  try {
+    const result = await apiFetch<{ credential: GitHubCredential }>(`/api/v1/admin/credentials/${credential.id}/test`, {
+      method: 'POST',
+      csrfToken: csrfTokenForRequest(),
+    })
+    Object.assign(credential, result.credential)
+    notice.value = `凭据“${credential.label}”验证通过：@${result.credential.auth_login}`
+  } catch (cause) {
+    error.value = messageFrom(cause, '测试 GitHub 凭据失败')
+  }
+}
+
+async function removeCredential(credential: GitHubCredential) {
+  const confirmed = window.confirm(
+    `确定删除凭据“${credential.label}”？删除后无法恢复，需要重新添加并验证 Token。`,
+  )
+  if (!confirmed) return
+  error.value = ''
+  notice.value = ''
+  try {
+    await apiFetch<{ id: number; deleted: boolean }>(`/api/v1/admin/credentials/${credential.id}`, {
+      method: 'DELETE',
+      csrfToken: csrfTokenForRequest(),
+    })
+    credentials.value = credentials.value.filter((item) => item.id !== credential.id)
+    notice.value = `凭据“${credential.label}”已删除`
+  } catch (cause) {
+    error.value = messageFrom(cause, '删除 GitHub 凭据失败')
+  }
+}
+
 function formatTime(value: string | null | undefined): string {
   if (!value) return '—'
   const date = new Date(value)
@@ -153,14 +187,32 @@ onMounted(loadCredentials)
             <td class="px-4 py-3">{{ credential.priority }}</td>
             <td class="px-4 py-3 text-muted">{{ formatTime(credential.last_checked_at) }}</td>
             <td class="px-4 py-3">
-              <button
-                type="button"
-                class="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-bg"
-                :data-test="`toggle-credential-${credential.id}`"
-                @click="toggleCredential(credential)"
-              >
-                {{ credential.enabled ? '停用' : '启用' }}
-              </button>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  class="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-bg"
+                  :data-test="`toggle-credential-${credential.id}`"
+                  @click="toggleCredential(credential)"
+                >
+                  {{ credential.enabled ? '停用' : '启用' }}
+                </button>
+                <button
+                  type="button"
+                  class="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-bg"
+                  :data-test="`test-credential-${credential.id}`"
+                  @click="testCredential(credential)"
+                >
+                  测试
+                </button>
+                <button
+                  type="button"
+                  class="rounded-md border border-danger/40 px-2.5 py-1 text-xs text-danger hover:bg-bg"
+                  :data-test="`delete-credential-${credential.id}`"
+                  @click="removeCredential(credential)"
+                >
+                  删除
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
