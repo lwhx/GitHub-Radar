@@ -20,26 +20,28 @@ const (
 )
 
 type Config struct {
-	AppEnv        string
-	Port          int
-	DatabasePath  string
-	PublicBaseURL string
-	AppSecret     string
-	EncryptionKey []byte
-	Timezone      string
-	StaticDir     string
-	CookieSecure  bool
-	Warnings      []string
+	AppEnv           string
+	Port             int
+	DatabasePath     string
+	PublicBaseURL    string
+	GitHubAPIBaseURL string
+	AppSecret        string
+	EncryptionKey    []byte
+	Timezone         string
+	StaticDir        string
+	CookieSecure     bool
+	Warnings         []string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:        valueOrDefault("APP_ENV", "development"),
-		DatabasePath:  valueOrDefault("DATABASE_PATH", defaultDatabasePath),
-		PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
-		AppSecret:     os.Getenv("APP_SECRET"),
-		Timezone:      valueOrDefault("APP_TIMEZONE", defaultTimezone),
-		StaticDir:     valueOrDefault("STATIC_DIR", defaultStaticDir),
+		AppEnv:           valueOrDefault("APP_ENV", "development"),
+		DatabasePath:     valueOrDefault("DATABASE_PATH", defaultDatabasePath),
+		PublicBaseURL:    os.Getenv("PUBLIC_BASE_URL"),
+		GitHubAPIBaseURL: os.Getenv("GITHUB_API_BASE_URL"),
+		AppSecret:        os.Getenv("APP_SECRET"),
+		Timezone:         valueOrDefault("APP_TIMEZONE", defaultTimezone),
+		StaticDir:        valueOrDefault("STATIC_DIR", defaultStaticDir),
 	}
 
 	port, err := loadPort()

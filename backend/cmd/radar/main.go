@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,9 @@ import (
 	"github.com/github-radar/github-radar/internal/api"
 	"github.com/github-radar/github-radar/internal/auth"
 	"github.com/github-radar/github-radar/internal/config"
+	"github.com/github-radar/github-radar/internal/credentials"
 	"github.com/github-radar/github-radar/internal/db"
+	"github.com/github-radar/github-radar/internal/scheduler"
 	"golang.org/x/term"
 )
 
@@ -83,9 +86,33 @@ func runServe(ctx context.Context, output io.Writer) error {
 	}
 	defer store.Close()
 
+	credentialService, err := credentials.NewService(store.SQL(), cfg.EncryptionKey, credentials.WithGitHubBaseURL(cfg.GitHubAPIBaseURL))
+	if err != nil {
+		return fmt.Errorf("initialize GitHub credential store: %w", err)
+	}
+	searcherSource, err := scheduler.CredentialSearcherSource(credentialService, cfg.GitHubAPIBaseURL)
+	if err != nil {
+		return fmt.Errorf("initialize GitHub searcher: %w", err)
+	}
+	repositorySource, err := scheduler.CredentialRepositoryGetterSource(credentialService, cfg.GitHubAPIBaseURL)
+	if err != nil {
+		return fmt.Errorf("initialize GitHub repository detail client: %w", err)
+	}
+	jobScheduler := scheduler.New(store.SQL(), searcherSource, repositorySource)
+	if err := jobScheduler.EnsureJob(ctx); err != nil {
+		return err
+	}
+	recoveryScheduler := scheduler.NewRecovery(store.SQL(), searcherSource)
+	if err := recoveryScheduler.EnsureJob(ctx); err != nil {
+		return err
+	}
+	collectorCtx, stopCollector := context.WithCancel(context.Background())
+	defer stopCollector()
+	go runCollectionLoop(collectorCtx, store.SQL(), jobScheduler, recoveryScheduler, logger)
+
 	server := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
+		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
 	}
@@ -110,6 +137,58 @@ func runServe(ctx context.Context, output io.Writer) error {
 	<-shutdownDone
 	logger.Info("http server stopped")
 	return nil
+}
+
+// runCollectionLoop performs due scheduled collections and recovers unfinished ones.
+func runCollectionLoop(ctx context.Context, database *sql.DB, collectionScheduler, recoveryScheduler *scheduler.Service, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	runners := []struct {
+		jobType string
+		trigger string
+		service *scheduler.Service
+	}{
+		{jobType: "github_collection", trigger: "schedule", service: collectionScheduler},
+		{jobType: "github_recovery", trigger: "recovery", service: recoveryScheduler},
+	}
+	for {
+		for _, runner := range runners {
+			due, err := collectionDue(ctx, database, runner.jobType)
+			if err != nil {
+				logger.Error("check collection schedule", "job_type", runner.jobType, "error", err)
+				continue
+			}
+			if !due {
+				continue
+			}
+			run, err := runner.service.RunOnce(ctx, runner.trigger)
+			switch {
+			case errors.Is(err, scheduler.ErrLeaseHeld), errors.Is(err, scheduler.ErrJobMissing):
+			case errors.Is(err, scheduler.ErrNoCredential):
+				logger.Info("collection skipped: no usable GitHub credential", "job_type", runner.jobType)
+			case err != nil:
+				logger.Error("scheduled collection failed", "job_type", runner.jobType, "run_id", run.ID, "error", err)
+			default:
+				logger.Info("scheduled collection finished", "job_type", runner.jobType, "run_id", run.ID, "created", run.CreatedCount, "pages", run.RequestCount)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func collectionDue(ctx context.Context, database *sql.DB, jobType string) (bool, error) {
+	var due int
+	err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM collector_jobs
+		WHERE enabled = 1 AND job_type = ?
+		AND (next_run_at IS NULL OR next_run_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`, jobType).Scan(&due)
+	if err != nil {
+		return false, fmt.Errorf("query collection schedule: %w", err)
+	}
+	return due > 0, nil
 }
 
 func runHealthcheck(ctx context.Context) error {

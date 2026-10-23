@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net"
@@ -177,7 +178,8 @@ func TestServeStopsWhenContextIsCancelled(t *testing.T) {
 	}
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("APP_PORT", fmt.Sprintf("%d", port))
-	t.Setenv("DATABASE_PATH", t.TempDir()+"/radar.db")
+	databasePath := t.TempDir() + "/radar.db"
+	t.Setenv("DATABASE_PATH", databasePath)
 	t.Setenv("STATIC_DIR", t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -195,6 +197,21 @@ func TestServeStopsWhenContextIsCancelled(t *testing.T) {
 			t.Fatalf("server did not start: %v", dialErr)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var recoveryInterval int
+	if err := database.QueryRow(`SELECT interval_seconds FROM collector_jobs WHERE job_type = 'github_recovery'`).Scan(&recoveryInterval); err != nil {
+		cancel()
+		t.Fatalf("recovery job was not seeded: %v", err)
+	}
+	if recoveryInterval != 86400 {
+		cancel()
+		t.Fatalf("recovery interval = %d, want 86400", recoveryInterval)
 	}
 	cancel()
 	select {

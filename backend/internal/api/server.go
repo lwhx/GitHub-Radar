@@ -46,6 +46,8 @@ type authService interface {
 type Config struct {
 	DB            *db.DB
 	Auth          authService
+	Credentials   credentialService
+	Scheduler     schedulerService
 	PublicBaseURL string
 	CookieSecure  bool
 	StaticDir     string
@@ -81,6 +83,13 @@ func New(config Config) http.Handler {
 	router.Get("/api/v1/admin/auth/session", s.session)
 	router.Post("/api/v1/admin/auth/logout", s.logout)
 	router.Get("/api/v1/admin/overview", s.overview)
+	router.Get("/api/v1/admin/credentials", s.listCredentials)
+	router.Post("/api/v1/admin/credentials", s.createCredential)
+	router.Patch("/api/v1/admin/credentials/{id}", s.updateCredential)
+	router.Get("/api/v1/admin/jobs", s.listJobs)
+	router.Post("/api/v1/admin/jobs/run", s.runJob)
+	router.Get("/api/v1/admin/job-runs", s.listJobRuns)
+	router.Get("/api/v1/admin/job-runs/{id}", s.jobRunDetail)
 	router.NotFound(s.notFound)
 	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
