@@ -67,3 +67,18 @@ GitHub 仓库搜索最多只暴露 1,000 条结果，因此采集以 `created:<f
 增量 `github_collection` 每 30 分钟运行：先执行 Search 发现，再以独立的 `core` 配额客户端顺序同步一批到期公开仓库。详情 `200` 在一个事务中更新仓库并写 `repository_detail` Star 快照；`304` 只推进验证时间，不改 Star、不写快照；404/410 保留历史并降低检查频率。Search 观察到 Star 差异时只提前详情同步，不直接覆盖没有对应快照的当前值。
 
 `github_recovery` 每 24 小时固定补采最近 48 小时，并使用 `github_recovery/created-public-recovery-v1` 窗口命名空间；增量游标只读取 `github_search` 窗口，因此恢复窗口不会跳过正常增量范围。失败窗口保存分页断点和指数退避时间，后续运行可按 source 重新领养；第三次失败转为显式 `coverage_incomplete`。父窗口标记 split 与两个子窗口创建在同一事务提交，避免崩溃后留下没有子窗口的 split 父窗口。
+
+## ADR-009：P1.3 榜单增长口径与黑马分数
+
+- **状态：** 已采纳
+- **范围：** P1.3 排行榜（`/api/v1/rankings`）的 24h/7d 增长与潜力黑马榜
+
+**决定：**
+
+1. 净变化 = 每个仓库的「最新快照」减去「截止时间之前的最新快照」（基线）。没有基线的仓库直接不进入榜单，而不是拿 0 或当前 Star 填充——宁空不假。
+2. `history_available` 只看增长窗口内是否存在早于截止时间的快照；为 false 时前端展示「数据不足」，`note` 字段给出解释。
+3. 潜力黑马硬条件：创建 ≤ 30 天、总 Star ≤ 3000、近 7 天净增 > 0；分数 = 净增 × (1 + 描述 5% + 语言 3% + 话题 2%)，`score_reason` 输出可读解释。
+4. 所有榜单统一 tie-break：`stars_count DESC, github_id ASC`，保证翻页顺序稳定；最新榜严格用 GitHub `created_at`，不用 `first_seen_at` 冒充创建时间。
+5. SQL 侧排序表达式（`rankScoreExpr`）与 Go 侧 `calculateRankScore` 必须同步系数，代码注释互相引用。
+
+**取舍：** 用窗口函数（`ROW_NUMBER() OVER (PARTITION BY repo_id ...)`）取基线与最新快照，比相关子查询可读，在当前数据量下性能足够；若快照表膨胀到千万级，再引入按 `(repo_id, captured_at)` 的预计算汇总表。

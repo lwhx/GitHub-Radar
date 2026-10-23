@@ -51,6 +51,28 @@ export interface CategoriesResponse {
   items: PublicCategory[]
 }
 
+export interface RankedRepo extends PublicRepo {
+  star_delta: number | null
+  score: number | null
+  score_reason: string | null
+}
+
+export interface RankingsMeta {
+  type: string
+  window_hours: number
+  page: number
+  limit: number
+  total: number
+  data_updated_at: string | null
+  history_available: boolean
+  note: string
+}
+
+export interface RankingsResponse {
+  items: RankedRepo[]
+  meta: RankingsMeta
+}
+
 export interface AdminOverview {
   repository_count: number
   snapshot_count: number

@@ -135,6 +135,50 @@ curl -i http://127.0.0.1:8080/api/v1/repos/acme/agent-framework
 
 > 列表接口支持 `category=<slug>` 参数：按分类过滤仓库；未知或停用分类返回 `400 INVALID_CATEGORY`。
 
+### `GET /api/v1/rankings?type=latest&page=1&limit=20`
+
+榜单数据一律基于已采集的真实数据，`type` 取 `latest` / `24h` / `7d` / `potential`（缺省 `latest`，未知值 `400 INVALID_TYPE`）。可选筛选：`category=<slug>`、`language=<language>`。
+
+| type | 排序口径 | `window_hours` |
+| --- | --- | --- |
+| `latest` | GitHub `created_at` 降序，同时间 `github_id` 升序 | `0` |
+| `24h` | 滚动 24 小时净 Star 变化降序 | `24` |
+| `7d` | 滚动 168 小时净 Star 变化降序 | `168` |
+| `potential` | 30 天内创建、总 Star ≤ 3000、近 7 天净增 > 0；`score = 净增 × (1 + 内容完整度加分)` 降序 | `168` |
+
+```json
+{
+  "data": {
+    "items": [
+      {
+        "full_name": "acme/rocket",
+        "stars_count": 180,
+        "star_delta": 80,
+        "score": null,
+        "score_reason": null
+      }
+    ],
+    "meta": {
+      "type": "24h",
+      "window_hours": 24,
+      "page": 1,
+      "limit": 20,
+      "total": 1,
+      "data_updated_at": "2026-10-25T10:00:00Z",
+      "history_available": true,
+      "note": "按滚动 24 小时净 Star 变化降序，样本来自已采集的 Star 快照"
+    }
+  }
+}
+```
+
+口径要点：
+
+- 净变化 = 最新快照 − 基线快照，基线取「截止时间之前的最新快照」；**没有基线的仓库不进入榜单**，不伪造 0 增长。
+- `history_available=false` 表示增长窗口无历史样本，前端应展示“数据不足”而不是 0（`note` 携带说明）。
+- 同分排序统一为 `stars_count DESC, github_id ASC`，翻页顺序稳定。
+- `potential` 的内容完整度加分：描述 +5%、语言 +3%、话题 +2%，`score_reason` 给出可读解释。
+
 ## 认证接口
 
 ### `POST /api/v1/admin/auth/login`

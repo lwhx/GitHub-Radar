@@ -10,6 +10,7 @@ import CategoriesPage from '../pages/CategoriesPage.vue'
 import FavoritesPage from '../pages/FavoritesPage.vue'
 import HomePage from '../pages/HomePage.vue'
 import NotFoundPage from '../pages/NotFoundPage.vue'
+import RankingsPage from '../pages/RankingsPage.vue'
 import RepoDetailPage from '../pages/RepoDetailPage.vue'
 import ReposPage from '../pages/ReposPage.vue'
 import { authState, ensureSession } from '../stores/auth'
@@ -32,6 +33,7 @@ const router = createRouter({
         { path: 'repos/:owner/:repo', name: 'repo-detail', component: RepoDetailPage },
         { path: 'categories', name: 'categories', component: CategoriesPage },
         { path: 'favorites', name: 'favorites', component: FavoritesPage },
+        { path: 'rankings', name: 'rankings', component: RankingsPage },
         { path: 'admin/login', name: 'admin-login', component: AdminLoginPage },
       ],
     },

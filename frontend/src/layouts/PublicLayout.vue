@@ -12,7 +12,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: '发现首页', to: '/' },
-  { label: '排行榜', disabled: true },
+  { label: '排行榜', to: '/rankings' },
   { label: '探索项目', to: '/repos' },
   { label: '分类专题', to: '/categories' },
   { label: '我的关注', to: '/favorites' },

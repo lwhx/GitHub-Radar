@@ -23,3 +23,7 @@ it('registers the categories page', () => {
 it('registers the favorites page', () => {
   expect(router.resolve('/favorites').name).toBe('favorites')
 })
+
+it('registers the rankings page', () => {
+  expect(router.resolve('/rankings').name).toBe('rankings')
+})
