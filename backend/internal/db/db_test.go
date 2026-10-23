@@ -3,12 +3,14 @@ package db_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	database "github.com/github-radar/github-radar/internal/db"
 )
@@ -479,6 +481,61 @@ func TestConcurrentOpenSerializesInitializationAndMigration(t *testing.T) {
 	}
 }
 
+func TestOpenRespectsContextDeadlineDuringWriteLockContention(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "radar.db")
+	store, err := database.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("initial Open() error = %v", err)
+	}
+	lockConn, err := store.SQL().Conn(context.Background())
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("acquire lock connection: %v", err)
+	}
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		_ = lockConn.Close()
+		_ = store.Close()
+		t.Fatalf("begin immediate lock transaction: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	started := time.Now()
+	contended, err := database.Open(ctx, path)
+	elapsed := time.Since(started)
+	cancel()
+	t.Logf("contended Open() elapsed = %v", elapsed)
+	if contended != nil {
+		_ = contended.Close()
+		t.Error("contended Open() returned non-nil database")
+	}
+	if err == nil {
+		t.Error("contended Open() error = nil, want context deadline error")
+	} else if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Errorf("contended Open() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed >= 750*time.Millisecond {
+		t.Errorf("contended Open() elapsed = %v, want less than 750ms", elapsed)
+	}
+
+	if _, rollbackErr := lockConn.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+		t.Fatalf("rollback lock transaction: %v", rollbackErr)
+	}
+	if err := lockConn.Close(); err != nil {
+		t.Fatalf("close lock connection: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close initial database: %v", err)
+	}
+
+	reopened, err := database.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open() after releasing lock error = %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened database: %v", err)
+	}
+}
+
 func TestInitialMigrationCreatesAllRequiredTables(t *testing.T) {
 	t.Parallel()
 
@@ -533,6 +590,72 @@ func TestReadySucceedsUntilDatabaseIsClosed(t *testing.T) {
 	}
 	if err := store.Ready(context.Background()); err == nil {
 		t.Fatal("Ready() after Close() error = nil, want error")
+	}
+}
+
+func TestReadyRespectsContextDeadlineDuringWriteLockContention(t *testing.T) {
+	store := openTestDB(t)
+	lockConn, err := store.SQL().Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire lock connection: %v", err)
+	}
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		_ = lockConn.Close()
+		t.Fatalf("begin immediate lock transaction: %v", err)
+	}
+	lockHeld := true
+	lockConnClosed := false
+	defer func() {
+		if lockHeld {
+			_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		if !lockConnClosed {
+			_ = lockConn.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = store.Ready(ctx)
+	elapsed := time.Since(started)
+	t.Logf("Ready() elapsed = %v", elapsed)
+	if err == nil {
+		t.Fatal("Ready() error = nil, want context deadline error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Errorf("Ready() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed >= 750*time.Millisecond {
+		t.Errorf("Ready() elapsed = %v, want less than 750ms", elapsed)
+	}
+
+	if _, err := lockConn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		t.Fatalf("rollback lock transaction: %v", err)
+	}
+	lockHeld = false
+	if err := lockConn.Close(); err != nil {
+		t.Fatalf("close lock connection: %v", err)
+	}
+	lockConnClosed = true
+	store.SQL().SetMaxOpenConns(1)
+	store.SQL().SetMaxIdleConns(1)
+	if err := store.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready() after releasing lock error = %v", err)
+	}
+	var busyTimeout int
+	if err := store.SQL().QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatalf("query busy_timeout after Ready(): %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("busy_timeout after Ready() = %d, want 5000", busyTimeout)
+	}
+	var readinessRows int
+	if err := store.SQL().QueryRow("SELECT COUNT(*) FROM site_settings WHERE key = '__radar_readiness__'").Scan(&readinessRows); err != nil {
+		t.Fatalf("query readiness residue: %v", err)
+	}
+	if readinessRows != 0 {
+		t.Errorf("readiness residue count = %d, want 0", readinessRows)
 	}
 }
 

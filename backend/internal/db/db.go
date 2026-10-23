@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -22,8 +24,9 @@ import (
 const directoryPermissions = 0o750
 
 const (
-	busyTimeoutMS = 5000
-	maxOpenConns  = 8
+	busyTimeoutMS            = 5000
+	connectionCleanupTimeout = 250 * time.Millisecond
+	maxOpenConns             = 8
 )
 
 // DB owns the application's SQLite connection pool.
@@ -105,29 +108,30 @@ func (db *DB) SQL() *sql.DB { return db.sql }
 
 // Ready verifies that SQLite can read and start a reversible write.
 func (db *DB) Ready(ctx context.Context) error {
-	conn, err := db.sql.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire SQLite readiness connection: %w", err)
-	}
-	defer conn.Close()
-
-	var one int
-	if err := conn.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		return fmt.Errorf("check SQLite read readiness: %w", err)
-	}
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin SQLite write readiness transaction: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO site_settings(key, json_value, updated_at)
-		VALUES ('__radar_readiness__', '{}', '2000-01-01T00:00:00Z')`); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("check SQLite write readiness: %w", err)
-	}
-	if err := tx.Rollback(); err != nil {
-		return fmt.Errorf("rollback SQLite write readiness transaction: %w", err)
-	}
-	return nil
+	return withLockSensitiveConn(ctx, db.sql, "readiness", func(conn *lockSensitiveConn) error {
+		var one int
+		if err := conn.conn.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+			return fmt.Errorf("check SQLite read readiness: %w", err)
+		}
+		if err := retryBusy(ctx, func() error {
+			if err := conn.beginImmediate(ctx); err != nil {
+				return err
+			}
+			_, writeErr := conn.conn.ExecContext(ctx, `INSERT OR REPLACE INTO site_settings(key, json_value, updated_at)
+				VALUES ('__radar_readiness__', '{}', '2000-01-01T00:00:00Z')`)
+			rollbackErr := conn.rollbackInBackground()
+			if rollbackErr != nil {
+				return nonRetryableError{errors.Join(writeErr, fmt.Errorf("rollback SQLite write readiness transaction: %w", rollbackErr))}
+			}
+			if writeErr != nil {
+				return writeErr
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("check SQLite write readiness: %w", err)
+		}
+		return nil
+	})
 }
 
 // Close closes the SQLite connection pool.
@@ -150,26 +154,14 @@ func migrateFS(ctx context.Context, db *sql.DB, migrationFiles fs.FS) error {
 		return err
 	}
 
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire migration connection: %w", err)
-	}
-	defer conn.Close()
-
-	if err := retryBusy(ctx, func() error {
-		_, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE")
-		return err
-	}); err != nil {
-		return fmt.Errorf("begin immediate migration transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	return withLockSensitiveConn(ctx, db, "migration", func(conn *lockSensitiveConn) error {
+		if err := retryBusy(ctx, func() error {
+			return conn.beginImmediate(ctx)
+		}); err != nil {
+			return fmt.Errorf("begin immediate migration transaction: %w", err)
 		}
-	}()
 
-	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		if _, err := conn.conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY CHECK (version > 0),
 		name TEXT NOT NULL,
 		checksum TEXT NOT NULL CHECK (length(checksum) = 64 AND checksum NOT GLOB '*[^0-9a-f]*'),
@@ -178,50 +170,47 @@ func migrateFS(ctx context.Context, db *sql.DB, migrationFiles fs.FS) error {
 				AND applied_at NOT GLOB '*[^0-9TZ:-]*' AND substr(applied_at, 12, 2) BETWEEN '00' AND '23'
 				AND strftime('%Y-%m-%dT%H:%M:%SZ', applied_at) IS NOT NULL
 				AND strftime('%Y-%m-%dT%H:%M:%SZ', applied_at) = applied_at)
-	)`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("commit schema_migrations initialization: %w", err)
-	}
-	committed = true
-
-	if err := retryBusy(ctx, func() error {
-		_, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE")
-		return err
-	}); err != nil {
-		return fmt.Errorf("begin immediate migration transaction: %w", err)
-	}
-	committed = false
-
-	for _, item := range list {
-		var appliedName, appliedChecksum string
-		err := conn.QueryRowContext(ctx, "SELECT name, checksum FROM schema_migrations WHERE version = ?", item.version).Scan(&appliedName, &appliedChecksum)
-		if err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("check migration %d: %w", item.version, err)
+		)`); err != nil {
+			return fmt.Errorf("create schema_migrations: %w", err)
 		}
-		if err == nil {
-			if appliedName != item.name {
-				return fmt.Errorf("migration %d name changed from %q to %q", item.version, appliedName, item.name)
+		if err := conn.commit(ctx); err != nil {
+			return fmt.Errorf("commit schema_migrations initialization: %w", err)
+		}
+
+		if err := retryBusy(ctx, func() error {
+			return conn.beginImmediate(ctx)
+		}); err != nil {
+			return fmt.Errorf("begin immediate migration transaction: %w", err)
+		}
+
+		for _, item := range list {
+			var appliedName, appliedChecksum string
+			err := conn.conn.QueryRowContext(ctx, "SELECT name, checksum FROM schema_migrations WHERE version = ?", item.version).Scan(&appliedName, &appliedChecksum)
+			if err != nil && err != sql.ErrNoRows {
+				return fmt.Errorf("check migration %d: %w", item.version, err)
 			}
-			if appliedChecksum != item.checksum {
-				return fmt.Errorf("migration %d (%s) checksum changed", item.version, item.name)
+			if err == nil {
+				if appliedName != item.name {
+					return fmt.Errorf("migration %d name changed from %q to %q", item.version, appliedName, item.name)
+				}
+				if appliedChecksum != item.checksum {
+					return fmt.Errorf("migration %d (%s) checksum changed", item.version, item.name)
+				}
+				continue
 			}
-			continue
-		}
 
-		if _, err := conn.ExecContext(ctx, item.sql); err != nil {
-			return fmt.Errorf("execute migration %d (%s): %w", item.version, item.name, err)
+			if _, err := conn.conn.ExecContext(ctx, item.sql); err != nil {
+				return fmt.Errorf("execute migration %d (%s): %w", item.version, item.name, err)
+			}
+			if _, err := conn.conn.ExecContext(ctx, "INSERT INTO schema_migrations(version, name, checksum) VALUES (?, ?, ?)", item.version, item.name, item.checksum); err != nil {
+				return fmt.Errorf("record migration %d: %w", item.version, err)
+			}
 		}
-		if _, err := conn.ExecContext(ctx, "INSERT INTO schema_migrations(version, name, checksum) VALUES (?, ?, ?)", item.version, item.name, item.checksum); err != nil {
-			return fmt.Errorf("record migration %d: %w", item.version, err)
+		if err := conn.commit(ctx); err != nil {
+			return fmt.Errorf("commit migrations: %w", err)
 		}
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("commit migrations: %w", err)
-	}
-	committed = true
-	return nil
+		return nil
+	})
 }
 
 func loadMigrations(migrationFiles fs.FS) ([]migration, error) {
@@ -269,29 +258,107 @@ func loadMigrations(migrationFiles fs.FS) ([]migration, error) {
 }
 
 func initializeWAL(ctx context.Context, db *sql.DB) error {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	return retryBusy(ctx, func() error {
-		var mode string
-		if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
-			return err
-		}
-		if strings.EqualFold(mode, "wal") {
+	return withLockSensitiveConn(ctx, db, "WAL initialization", func(conn *lockSensitiveConn) error {
+		return retryBusy(ctx, func() error {
+			var mode string
+			if err := conn.conn.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+				return err
+			}
+			if strings.EqualFold(mode, "wal") {
+				return nil
+			}
+			if err := conn.conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
+				return err
+			}
+			if !strings.EqualFold(mode, "wal") {
+				return fmt.Errorf("journal_mode = %q, want WAL", mode)
+			}
 			return nil
-		}
-		if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
-			return err
-		}
-		if !strings.EqualFold(mode, "wal") {
-			return fmt.Errorf("journal_mode = %q, want WAL", mode)
-		}
-		return nil
+		})
 	})
 }
+
+type lockSensitiveConn struct {
+	conn          *sql.Conn
+	inTransaction bool
+}
+
+func withLockSensitiveConn(ctx context.Context, db *sql.DB, purpose string, operation func(*lockSensitiveConn) error) (err error) {
+	sqlConn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire SQLite %s connection: %w", purpose, err)
+	}
+	conn := &lockSensitiveConn{conn: sqlConn}
+	if _, err := sqlConn.ExecContext(ctx, "PRAGMA busy_timeout = 0"); err != nil {
+		discardErr := discardConn(sqlConn)
+		return errors.Join(fmt.Errorf("set SQLite %s connection busy timeout: %w", purpose, err), discardErr)
+	}
+
+	defer func() {
+		if conn.inTransaction {
+			if rollbackErr := conn.rollbackInBackground(); rollbackErr != nil {
+				err = errors.Join(err, fmt.Errorf("rollback SQLite %s transaction: %w", purpose, rollbackErr))
+				err = errors.Join(err, discardConn(sqlConn))
+				return
+			}
+		}
+
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), connectionCleanupTimeout)
+		_, restoreErr := sqlConn.ExecContext(cleanupCtx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeoutMS))
+		cancel()
+		if restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore SQLite %s connection busy timeout: %w", purpose, restoreErr))
+			err = errors.Join(err, discardConn(sqlConn))
+			return
+		}
+		if closeErr := sqlConn.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("release SQLite %s connection: %w", purpose, closeErr))
+		}
+	}()
+
+	return operation(conn)
+}
+
+func (conn *lockSensitiveConn) beginImmediate(ctx context.Context) error {
+	if _, err := conn.conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	conn.inTransaction = true
+	return nil
+}
+
+func (conn *lockSensitiveConn) commit(ctx context.Context) error {
+	if _, err := conn.conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	conn.inTransaction = false
+	return nil
+}
+
+func (conn *lockSensitiveConn) rollbackInBackground() error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), connectionCleanupTimeout)
+	defer cancel()
+	if _, err := conn.conn.ExecContext(cleanupCtx, "ROLLBACK"); err != nil {
+		return err
+	}
+	conn.inTransaction = false
+	return nil
+}
+
+func discardConn(conn *sql.Conn) error {
+	err := conn.Raw(func(any) error { return driver.ErrBadConn })
+	if errors.Is(err, driver.ErrBadConn) {
+		return nil
+	}
+	return err
+}
+
+type nonRetryableError struct {
+	err error
+}
+
+func (err nonRetryableError) Error() string { return err.err.Error() }
+func (err nonRetryableError) Unwrap() error { return err.err }
 
 func retryBusy(ctx context.Context, operation func() error) error {
 	deadline := time.Now().Add(time.Duration(busyTimeoutMS) * time.Millisecond)
@@ -317,6 +384,10 @@ func retryBusy(ctx context.Context, operation func() error) error {
 }
 
 func isBusyError(err error) bool {
+	var nonRetryable nonRetryableError
+	if errors.As(err, &nonRetryable) {
+		return false
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "sqlite_busy") || strings.Contains(message, "database is locked")
 }
