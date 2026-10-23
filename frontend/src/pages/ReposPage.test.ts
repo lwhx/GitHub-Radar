@@ -135,7 +135,7 @@ it('applies the category filter from the route query', async () => {
 
   await router.push('/repos?category=ai')
   await router.isReady()
-  const wrapper = mount(ReposPage, { global: { plugins: [router] } })
+  mount(ReposPage, { global: { plugins: [router] } })
   await flushPromises()
 
   expect(String(fetchMock.mock.calls[0]?.[0])).toContain('category=ai')
