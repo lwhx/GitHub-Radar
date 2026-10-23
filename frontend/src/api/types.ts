@@ -114,6 +114,20 @@ export interface CredentialsResponse {
   credentials: GitHubCredential[]
 }
 
+export interface AdminCategory {
+  id: number
+  slug: string
+  title: string
+  description: string | null
+  sort_order: number
+  enabled: boolean
+  repo_count: number
+}
+
+export interface AdminCategoriesResponse {
+  items: AdminCategory[]
+}
+
 export interface CollectorJob {
   id: number
   job_type: string

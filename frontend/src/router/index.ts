@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import PublicLayout from '../layouts/PublicLayout.vue'
 import AdminCredentialsPage from '../pages/AdminCredentialsPage.vue'
+import AdminCategoriesPage from '../pages/AdminCategoriesPage.vue'
 import AdminJobsPage from '../pages/AdminJobsPage.vue'
 import AdminLoginPage from '../pages/AdminLoginPage.vue'
 import AdminOverviewPage from '../pages/AdminOverviewPage.vue'
@@ -44,6 +45,7 @@ const router = createRouter({
       children: [
         { path: '', name: 'admin-overview', component: AdminOverviewPage },
         { path: 'credentials', name: 'admin-credentials', component: AdminCredentialsPage },
+        { path: 'categories', name: 'admin-categories', component: AdminCategoriesPage },
         { path: 'jobs', name: 'admin-jobs', component: AdminJobsPage },
       ],
     },
