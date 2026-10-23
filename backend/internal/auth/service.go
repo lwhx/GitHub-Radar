@@ -142,7 +142,10 @@ func (s *Service) Login(ctx context.Context, username, password string, ttl time
 	}
 
 	now := canonicalTime(s.now())
-	expiresAt := canonicalTime(now.Add(ttl))
+	if remainder := ttl % time.Second; remainder != 0 {
+		ttl += time.Second - remainder
+	}
+	expiresAt := now.Add(ttl)
 	for attempt := 0; attempt < maxTokenRetries; attempt++ {
 		token, err := randomToken(s.random)
 		if err != nil {
