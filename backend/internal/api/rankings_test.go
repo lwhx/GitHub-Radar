@@ -123,7 +123,7 @@ func TestListRankingsComputesRollingStarGrowth(t *testing.T) {
 	seedPublicRepo(t, store, 914, "acme", "hidden-hot", 999)
 	seedRankSnapshot(t, store, 911, 100, now.Add(-25*time.Hour))
 	seedRankSnapshot(t, store, 911, 180, now.Add(-1*time.Hour))
-	seedRankSnapshot(t, store, 912, 50, now.Add(-30*time.Hour))
+	seedRankSnapshot(t, store, 912, 50, now.Add(-28*time.Hour))
 	seedRankSnapshot(t, store, 912, 70, now.Add(-2*time.Hour))
 	seedRankSnapshot(t, store, 913, 40, now.Add(-1*time.Hour))
 	seedRankSnapshot(t, store, 914, 100, now.Add(-25*time.Hour))
@@ -274,15 +274,17 @@ func TestListRankingsExcludesBaselineOlderThanWindowGrace(t *testing.T) {
 	}
 }
 
-// 边界：基线比截止时间早一个同步周期（6h）仍可接受，早更多则不可。
+// 口径：基线可在截止时间前一个同步周期（6h）内，超出则不可。
+// 注意快照时间要离带边缘留出余量——handler 的 time.Now() 比测试的 now 晚几毫秒，
+// 贴着 ±6h 边界写用例会随时钟漂移变成间歇失败。
 func TestListRankingsAcceptsBaselineWithinOneSyncInterval(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
 	seedPublicRepo(t, store, 952, "acme", "edge", 130)
 	seedPublicRepo(t, store, 953, "acme", "too-old", 130)
-	seedRankSnapshot(t, store, 952, 100, now.Add(-30*time.Hour))
+	seedRankSnapshot(t, store, 952, 100, now.Add(-29*time.Hour))
 	seedRankSnapshot(t, store, 952, 130, now.Add(-1*time.Hour))
-	seedRankSnapshot(t, store, 953, 100, now.Add(-31*time.Hour))
+	seedRankSnapshot(t, store, 953, 100, now.Add(-32*time.Hour))
 	seedRankSnapshot(t, store, 953, 130, now.Add(-1*time.Hour))
 	handler := newTestHandler(t, store)
 
