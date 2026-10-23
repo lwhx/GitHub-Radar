@@ -95,6 +95,7 @@ func New(config Config) http.Handler {
 	router.Delete("/api/v1/admin/credentials/{id}", s.deleteCredential)
 	router.Get("/api/v1/admin/jobs", s.listJobs)
 	router.Post("/api/v1/admin/jobs/run", s.runJob)
+	router.Patch("/api/v1/admin/jobs/{id}", s.updateJob)
 	router.Get("/api/v1/admin/job-runs", s.listJobRuns)
 	router.Get("/api/v1/admin/job-runs/{id}", s.jobRunDetail)
 	router.NotFound(s.notFound)

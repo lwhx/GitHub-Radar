@@ -33,6 +33,8 @@ var (
 	ErrLeaseHeld = errors.New("collection job lease is held by another runner")
 	// ErrJobMissing reports that the collection job row has not been seeded.
 	ErrJobMissing = errors.New("collection job does not exist")
+	// ErrInvalidInterval reports an unusable schedule interval.
+	ErrInvalidInterval = errors.New("interval must be at least 60 seconds")
 	// ErrNoCredential reports that collection cannot start without a usable token.
 	// It is a setup state rather than a failed run, so it records no run row.
 	ErrNoCredential = errors.New("no usable GitHub credential is configured")
@@ -126,6 +128,69 @@ func (service *Service) EnsureJob(ctx context.Context) error {
 	}
 	return nil
 }
+
+// SetJobPolicy 调整采集任务的开关与周期。启用时重新安排 next_run_at（now + interval），
+// 避免停用期间积压的旧时间点引发立即补跑；租约字段不受影响。
+func (service *Service) SetJobPolicy(ctx context.Context, jobID int64, enabled *bool, intervalSeconds *int) (Job, error) {
+	if intervalSeconds != nil && *intervalSeconds < minimumIntervalSeconds {
+		return Job{}, ErrInvalidInterval
+	}
+	job, err := service.jobByID(ctx, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	if intervalSeconds != nil {
+		job.IntervalSecond = *intervalSeconds
+	}
+	if enabled != nil {
+		job.Enabled = *enabled
+	}
+	if job.Enabled {
+		next := service.now().UTC().Add(time.Duration(job.IntervalSecond) * time.Second)
+		job.NextRunAt = &next
+	}
+	enabledValue := 0
+	if job.Enabled {
+		enabledValue = 1
+	}
+	var nextRun any
+	if job.NextRunAt != nil {
+		nextRun = formatTime(*job.NextRunAt)
+	}
+	if _, err := service.db.ExecContext(ctx, `UPDATE collector_jobs
+		SET enabled = ?, interval_seconds = ?, next_run_at = ? WHERE id = ?`,
+		enabledValue, job.IntervalSecond, nextRun, jobID); err != nil {
+		return Job{}, fmt.Errorf("update collector job policy: %w", err)
+	}
+	return job, nil
+}
+
+func (service *Service) jobByID(ctx context.Context, jobID int64) (Job, error) {
+	var item Job
+	var enabled int
+	var nextRun, leaseOwner, leaseExpiry sql.NullString
+	err := service.db.QueryRowContext(ctx, `SELECT id, job_type, enabled, interval_seconds, next_run_at, lease_owner, lease_expires_at
+		FROM collector_jobs WHERE id = ?`, jobID).
+		Scan(&item.ID, &item.JobType, &enabled, &item.IntervalSecond, &nextRun, &leaseOwner, &leaseExpiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, ErrJobMissing
+	}
+	if err != nil {
+		return Job{}, fmt.Errorf("load collector job: %w", err)
+	}
+	item.Enabled = enabled == 1
+	item.NextRunAt = parseTime(nextRun)
+	item.LeaseExpiresAt = parseTime(leaseExpiry)
+	if leaseOwner.Valid {
+		owner := leaseOwner.String
+		item.LeaseOwner = &owner
+	}
+	return item, nil
+}
+
+const (
+	minimumIntervalSeconds = 60
+)
 
 func (service *Service) RunOnce(ctx context.Context, trigger string) (Run, error) {
 	jobID, leaseToken, err := service.claimLease(ctx)

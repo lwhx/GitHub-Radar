@@ -65,6 +65,29 @@ func (fake *fakeCredentials) Delete(_ context.Context, id int64) error {
 type fakeScheduler struct {
 	runs        int
 	precheckErr error
+	policyCalls []jobPolicyCall
+	policyErr   error
+}
+
+type jobPolicyCall struct {
+	ID       int64
+	Enabled  *bool
+	Interval *int
+}
+
+func (fake *fakeScheduler) SetJobPolicy(_ context.Context, id int64, enabled *bool, interval *int) (scheduler.Job, error) {
+	fake.policyCalls = append(fake.policyCalls, jobPolicyCall{ID: id, Enabled: enabled, Interval: interval})
+	if fake.policyErr != nil {
+		return scheduler.Job{}, fake.policyErr
+	}
+	job := scheduler.Job{ID: id, JobType: "github_collection", Enabled: true, IntervalSecond: 1800}
+	if enabled != nil {
+		job.Enabled = *enabled
+	}
+	if interval != nil {
+		job.IntervalSecond = *interval
+	}
+	return job, nil
 }
 
 func (fake *fakeScheduler) EnsureJob(context.Context) error { return nil }

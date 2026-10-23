@@ -36,6 +36,7 @@ type schedulerService interface {
 	JobRunHistory(context.Context, int) ([]scheduler.JobRun, error)
 	RunEvents(context.Context, int64, int) ([]scheduler.RunEvent, error)
 	Run(context.Context, int64) (scheduler.JobRun, error)
+	SetJobPolicy(context.Context, int64, *bool, *int) (scheduler.Job, error)
 }
 
 func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) (auth.Admin, bool) {
@@ -196,6 +197,61 @@ func (s *server) updateCredential(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), &admin.ID, "admin.credential.update", strconv.FormatInt(id, 10), "success")
 	w.Header().Set("Cache-Control", "no-store")
 	writeData(w, http.StatusOK, map[string]any{"id": id, "enabled": *payload.Enabled})
+}
+
+type updateJobPayload struct {
+	Enabled         *bool `json:"enabled"`
+	IntervalSeconds *int  `json:"interval_seconds"`
+}
+
+func (s *server) updateJob(w http.ResponseWriter, r *http.Request) {
+	if !s.validOrigin(r) {
+		writeError(w, r, http.StatusForbidden, "INVALID_ORIGIN", "Request origin is not allowed")
+		return
+	}
+	admin, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if !s.requireCSRF(w, r) {
+		return
+	}
+	if s.schedulerUnavailable(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	payload, decodeErr := decodeAdminBody[updateJobPayload](w, r)
+	if decodeErr != nil {
+		writeError(w, r, decodeErr.status, decodeErr.code, decodeErr.message)
+		return
+	}
+	if payload.Enabled == nil && payload.IntervalSeconds == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "enabled or interval_seconds is required")
+		return
+	}
+	if payload.IntervalSeconds != nil && *payload.IntervalSeconds < 60 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL", "interval_seconds must be at least 60")
+		return
+	}
+	job, err := s.config.Scheduler.SetJobPolicy(r.Context(), id, payload.Enabled, payload.IntervalSeconds)
+	if err != nil {
+		s.audit(r.Context(), &admin.ID, "admin.job.update", strconv.FormatInt(id, 10), "failure")
+		switch {
+		case errors.Is(err, scheduler.ErrJobMissing):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "Job not found")
+		case errors.Is(err, scheduler.ErrInvalidInterval):
+			writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL", "interval_seconds must be at least 60")
+		default:
+			s.config.Logger.Error("update collector job", "request_id", requestID(r.Context()), "error", err)
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to update job")
+		}
+		return
+	}
+	s.audit(r.Context(), &admin.ID, "admin.job.update", job.JobType, "success")
+	writeData(w, http.StatusOK, map[string]any{"job": job})
 }
 
 func (s *server) testCredential(w http.ResponseWriter, r *http.Request) {

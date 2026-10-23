@@ -338,6 +338,19 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 
 尚未添加、或全部凭据已停用/处于冷却期时返回 `409 CREDENTIAL_REQUIRED`，请求不会创建空运行记录。定时采集同样会跳过并按各自周期顺延，而不是持续写入失败运行。
 
+### `PATCH /api/v1/admin/jobs/{id}`
+
+调整采集任务的启用状态与周期，需要合法 Origin、会话和 CSRF，至少提供一个字段：
+
+```json
+{ "enabled": true, "interval_seconds": 1800 }
+```
+
+- `interval_seconds` 最小 60，否则返回 `400 INVALID_INTERVAL`；两者都缺失返回 `400 INVALID_REQUEST`；
+- 任务不存在返回 `404 NOT_FOUND`；
+- 重新启用时会把 `next_run_at` 重排为「当前时间 + 周期」，避免停用期间积压的旧时间点触发立即补跑；租约字段不受影响；
+- 审计日志记录 `admin.job.update`。
+
 ### `GET /api/v1/admin/job-runs?limit=50`
 
 返回最近运行，包含触发来源，以及请求、新增、更新、详情快照、304、重试、限流、失败和覆盖不完整计数。运行状态包括 `running`、`completed`、`failed` 和 `deferred`；详情同步遇到 GitHub 主/次限流时使用 `deferred`，按 `RetryAt` 重排任务且不增加仓库失败次数。`limit` 有效范围为 1–200，缺省或越界时使用 50。
