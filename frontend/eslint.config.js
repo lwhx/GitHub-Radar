@@ -13,6 +13,16 @@ export default [
       parserOptions: {
         parser: tseslint.parser,
       },
+      globals: {
+        console: 'readonly',
+        document: 'readonly',
+        fetch: 'readonly',
+        location: 'readonly',
+        navigator: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        window: 'readonly',
+      },
     },
   },
 ]

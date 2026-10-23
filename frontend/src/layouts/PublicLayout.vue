@@ -13,7 +13,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: '发现首页', to: '/' },
   { label: '排行榜', disabled: true },
-  { label: '探索项目', disabled: true },
+  { label: '探索项目', to: '/repos' },
   { label: '分类专题', disabled: true },
   { label: '我的关注', disabled: true },
 ]
@@ -76,7 +76,7 @@ function closeDrawer() {
           <template v-for="item in navItems" :key="item.label">
             <RouterLink
               v-if="item.to"
-              to="/"
+              :to="item.to"
               class="rounded-md px-3 py-2 text-sm hover:bg-bg"
               active-class="bg-bg font-medium"
               @click="closeDrawer"
@@ -102,7 +102,7 @@ function closeDrawer() {
           <template v-for="item in navItems" :key="item.label">
             <RouterLink
               v-if="item.to"
-              to="/"
+              :to="item.to"
               class="rounded-md px-3 py-2 text-sm hover:bg-card"
               active-class="bg-card font-medium"
             >

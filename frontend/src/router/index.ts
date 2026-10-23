@@ -8,6 +8,8 @@ import AdminLoginPage from '../pages/AdminLoginPage.vue'
 import AdminOverviewPage from '../pages/AdminOverviewPage.vue'
 import HomePage from '../pages/HomePage.vue'
 import NotFoundPage from '../pages/NotFoundPage.vue'
+import RepoDetailPage from '../pages/RepoDetailPage.vue'
+import ReposPage from '../pages/ReposPage.vue'
 import { authState, ensureSession } from '../stores/auth'
 
 declare module 'vue-router' {
@@ -24,6 +26,8 @@ const router = createRouter({
       component: PublicLayout,
       children: [
         { path: '', name: 'home', component: HomePage },
+        { path: 'repos', name: 'repos', component: ReposPage },
+        { path: 'repos/:owner/:repo', name: 'repo-detail', component: RepoDetailPage },
         { path: 'admin/login', name: 'admin-login', component: AdminLoginPage },
       ],
     },

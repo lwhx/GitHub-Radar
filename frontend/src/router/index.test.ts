@@ -8,3 +8,10 @@ describe('admin routes', () => {
     expect(router.resolve('/admin/jobs').name).toBe('admin-jobs')
   })
 })
+
+describe('public repository routes', () => {
+  it('registers the repository list and detail pages', () => {
+    expect(router.resolve('/repos').name).toBe('repos')
+    expect(router.resolve('/repos/acme/rocket').name).toBe('repo-detail')
+  })
+})

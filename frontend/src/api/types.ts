@@ -1,3 +1,37 @@
+export interface PublicRepo {
+  full_name: string
+  owner: string
+  name: string
+  html_url: string
+  homepage_url: string | null
+  description: string | null
+  language: string | null
+  license_spdx: string | null
+  topics: string[]
+  stars_count: number
+  forks_count: number
+  open_issues_count: number
+  is_fork: boolean
+  is_archived: boolean
+  github_created_at: string
+  github_updated_at: string
+  pushed_at: string | null
+  first_seen_at: string
+  last_synced_at: string | null
+}
+
+export interface ReposListMeta {
+  total: number
+  page: number
+  limit: number
+  data_updated_at: string | null
+}
+
+export interface ReposResponse {
+  items: PublicRepo[]
+  meta: ReposListMeta
+}
+
 export interface PublicStats {
   repositories: number
   star_snapshots: number
