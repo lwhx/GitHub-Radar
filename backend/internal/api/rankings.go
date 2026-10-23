@@ -15,7 +15,10 @@ const (
 	rankingWindow7d   = 168
 	potentialMaxStars = 3000
 	potentialMaxAge   = 30 * 24 * time.Hour
-	timeLayoutUTC     = "2006-01-02T15:04:05Z"
+	// 基线容差：详情同步约 6 小时一轮，基线快照允许比窗口截止时间早一个同步周期。
+	// 没有带内基线的仓库不进入榜单——避免 5 天前的快照把 5 天增长冒充成 24h 净增。
+	rankingBaselineGrace = 6 * time.Hour
+	timeLayoutUTC        = "2006-01-02T15:04:05Z"
 )
 
 // rankedRepo 在公共仓库字段之上携带榜单口径字段
@@ -38,8 +41,8 @@ type rankingsMeta struct {
 	Note             string  `json:"note"`
 }
 
-// growthCTE 取每个仓库的最新快照与「截止时间之前的最新快照」作基线，
-// 净增长 = 最新 - 基线；缺少基线的仓库不进入榜单（而不是伪造 0 增长）。
+// growthCTE 取每个仓库的最新快照与「截止时间之前且距截止时间不超过一个同步周期的最新快照」作基线，
+// 净增长 = 最新 - 基线；基线超出容差带或缺失的仓库不进入榜单（而不是伪造 0 或夸大的增长）。
 const growthCTE = `
 WITH latest AS (
 	SELECT repo_id, star_count FROM (
@@ -50,7 +53,7 @@ WITH latest AS (
 baseline AS (
 	SELECT repo_id, star_count FROM (
 		SELECT repo_id, star_count, ROW_NUMBER() OVER (PARTITION BY repo_id ORDER BY captured_at DESC) AS rn
-		FROM star_snapshots WHERE captured_at <= ?
+		FROM star_snapshots WHERE captured_at <= ? AND captured_at >= ?
 	) WHERE rn = 1
 )`
 
@@ -140,16 +143,17 @@ func (s *server) listRankings(w http.ResponseWriter, r *http.Request) {
 		windowHours = rankingWindow7d
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(windowHours) * time.Hour).Format(timeLayoutUTC)
+	graceCutoff := time.Now().UTC().Add(-(time.Duration(windowHours)*time.Hour + rankingBaselineGrace)).Format(timeLayoutUTC)
 	meta := rankingsMeta{
 		Type: rankType, WindowHours: windowHours, Page: page, Limit: limit,
 		DataUpdatedAt: updatedAt,
 		Note:          s.rankingNote(rankType, windowHours),
 	}
-	meta.HistoryAvailable = s.rankingHasHistory(store, cutoff)
+	meta.HistoryAvailable = s.rankingHasHistory(store, cutoff, graceCutoff)
 	if !meta.HistoryAvailable {
 		meta.Note = "数据不足：增长窗口无有效历史样本，快照积累后自动填充（不会显示 0）"
 	}
-	s.writeGrowthRanking(w, r, store, where, filterArgs, page, limit, rankType, windowHours, cutoff, meta)
+	s.writeGrowthRanking(w, r, store, where, filterArgs, page, limit, rankType, windowHours, cutoff, graceCutoff, meta)
 }
 
 func (s *server) rankingFilters(w http.ResponseWriter, r *http.Request) (string, []any, bool) {
@@ -179,9 +183,9 @@ func (s *server) rankingDataUpdatedAt(store *sql.DB) *string {
 	return nullStringPtr(updatedAt)
 }
 
-func (s *server) rankingHasHistory(store *sql.DB, cutoff string) bool {
+func (s *server) rankingHasHistory(store *sql.DB, cutoff, graceCutoff string) bool {
 	var exists int
-	if err := store.QueryRow(`SELECT EXISTS (SELECT 1 FROM star_snapshots WHERE captured_at <= ?)`, cutoff).Scan(&exists); err != nil {
+	if err := store.QueryRow(`SELECT EXISTS (SELECT 1 FROM star_snapshots WHERE captured_at <= ? AND captured_at >= ?)`, cutoff, graceCutoff).Scan(&exists); err != nil {
 		return false
 	}
 	return exists == 1
@@ -226,7 +230,7 @@ func (s *server) writeLatestRanking(w http.ResponseWriter, r *http.Request, stor
 	writeData(w, http.StatusOK, map[string]any{"items": items, "meta": meta})
 }
 
-func (s *server) writeGrowthRanking(w http.ResponseWriter, r *http.Request, store *sql.DB, where string, filterArgs []any, page, limit int, rankType string, windowHours int, cutoff string, meta rankingsMeta) {
+func (s *server) writeGrowthRanking(w http.ResponseWriter, r *http.Request, store *sql.DB, where string, filterArgs []any, page, limit int, rankType string, windowHours int, cutoff, graceCutoff string, meta rankingsMeta) {
 	extraWhere := ""
 	extraArgs := []any{}
 	orderExpr := "star_delta DESC, r.stars_count DESC, r.github_id ASC"
@@ -237,7 +241,7 @@ func (s *server) writeGrowthRanking(w http.ResponseWriter, r *http.Request, stor
 		orderExpr = "rank_score DESC, r.stars_count DESC, r.github_id ASC"
 	}
 
-	countArgs := append([]any{cutoff}, filterArgs...)
+	countArgs := append([]any{cutoff, graceCutoff}, filterArgs...)
 	countArgs = append(countArgs, extraArgs...)
 	var total int
 	if err := store.QueryRow(growthCTE+` SELECT COUNT(*) FROM repositories r
@@ -248,7 +252,7 @@ func (s *server) writeGrowthRanking(w http.ResponseWriter, r *http.Request, stor
 		return
 	}
 
-	selectArgs := append([]any{cutoff}, filterArgs...)
+	selectArgs := append([]any{cutoff, graceCutoff}, filterArgs...)
 	selectArgs = append(selectArgs, extraArgs...)
 	selectArgs = append(selectArgs, limit, (page-1)*limit)
 	rows, err := store.Query(growthCTE+`

@@ -75,7 +75,7 @@ GitHub 仓库搜索最多只暴露 1,000 条结果，因此采集以 `created:<f
 
 **决定：**
 
-1. 净变化 = 每个仓库的「最新快照」减去「截止时间之前的最新快照」（基线）。没有基线的仓库直接不进入榜单，而不是拿 0 或当前 Star 填充——宁空不假。
+1. 净变化 = 每个仓库的「最新快照」减去「基线快照」。基线必须满足 `cutoff - 6h <= captured_at <= cutoff`（6h 为一个详情同步周期）：早于容差带的旧快照会把多日增长冒充成窗口增量，因此直接不进入榜单，不用 0 或当前 Star 填充——宁空不假。刷新（2026-10-25）：初版只加了上界，5 天前的快照会把 5 天增长标成 24h，已由 `TestListRankingsExcludesBaselineOlderThanWindowGrace` 与边界用例锁死。
 2. `history_available` 只看增长窗口内是否存在早于截止时间的快照；为 false 时前端展示「数据不足」，`note` 字段给出解释。
 3. 潜力黑马硬条件：创建 ≤ 30 天、总 Star ≤ 3000、近 7 天净增 > 0；分数 = 净增 × (1 + 描述 5% + 语言 3% + 话题 2%)，`score_reason` 输出可读解释。
 4. 所有榜单统一 tie-break：`stars_count DESC, github_id ASC`，保证翻页顺序稳定；最新榜严格用 GitHub `created_at`，不用 `first_seen_at` 冒充创建时间。

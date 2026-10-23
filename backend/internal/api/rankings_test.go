@@ -189,22 +189,22 @@ func TestListRankingsPotentialKeepsYoungGrowingRepos(t *testing.T) {
 	seedPublicRepo(t, store, 931, "acme", "rising", 520)
 	setRepoCreatedAt(t, store, 931, now.AddDate(0, 0, -10))
 	setRepoRankMeta(t, store, 931, "一个快速上升的项目", "Go", `["ai","agents"]`)
-	seedRankSnapshot(t, store, 931, 400, now.Add(-8*24*time.Hour))
+	seedRankSnapshot(t, store, 931, 400, now.Add(-170*time.Hour))
 	seedRankSnapshot(t, store, 931, 520, now.Add(-1*time.Hour))
 
 	seedPublicRepo(t, store, 932, "acme", "mature", 500)
 	setRepoCreatedAt(t, store, 932, now.AddDate(0, 0, -60))
-	seedRankSnapshot(t, store, 932, 400, now.Add(-8*24*time.Hour))
+	seedRankSnapshot(t, store, 932, 400, now.Add(-170*time.Hour))
 	seedRankSnapshot(t, store, 932, 500, now.Add(-1*time.Hour))
 
 	seedPublicRepo(t, store, 933, "acme", "huge", 4000)
 	setRepoCreatedAt(t, store, 933, now.AddDate(0, 0, -10))
-	seedRankSnapshot(t, store, 933, 3900, now.Add(-8*24*time.Hour))
+	seedRankSnapshot(t, store, 933, 3900, now.Add(-170*time.Hour))
 	seedRankSnapshot(t, store, 933, 4000, now.Add(-1*time.Hour))
 
 	seedPublicRepo(t, store, 934, "acme", "flat", 300)
 	setRepoCreatedAt(t, store, 934, now.AddDate(0, 0, -10))
-	seedRankSnapshot(t, store, 934, 300, now.Add(-8*24*time.Hour))
+	seedRankSnapshot(t, store, 934, 300, now.Add(-170*time.Hour))
 	seedRankSnapshot(t, store, 934, 300, now.Add(-1*time.Hour))
 	handler := newTestHandler(t, store)
 
@@ -247,5 +247,58 @@ func TestListRankingsDefaultsToLatestAndRejectsUnknownType(t *testing.T) {
 	unknown := request(t, handler, http.MethodGet, "/api/v1/rankings?type=weekly")
 	if unknown.Code != http.StatusBadRequest {
 		t.Fatalf("unknown type status = %d, want 400", unknown.Code)
+	}
+}
+
+// 口径缺陷回归：基线快照必须在窗口截止时间附近（容差 = 一个同步周期 6h）。
+// 否则 5 天前的快照会把 5 天的增长冒充成「24h 净增」。
+func TestListRankingsExcludesBaselineOlderThanWindowGrace(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	seedPublicRepo(t, store, 951, "acme", "stale", 100)
+	seedRankSnapshot(t, store, 951, 20, now.Add(-120*time.Hour))
+	seedRankSnapshot(t, store, 951, 100, now.Add(-1*time.Hour))
+	handler := newTestHandler(t, store)
+
+	recorder := request(t, handler, http.MethodGet, "/api/v1/rankings?type=24h")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	payload := decodeRankings(t, recorder)
+	if payload.Data.Meta.Total != 0 || len(payload.Data.Items) != 0 {
+		t.Fatalf("total=%d items=%d, want empty board: a 5-day-old snapshot must not back a 24h delta",
+			payload.Data.Meta.Total, len(payload.Data.Items))
+	}
+	if payload.Data.Meta.HistoryAvailable {
+		t.Fatal("history_available must be false when no snapshot falls in the window band")
+	}
+}
+
+// 边界：基线比截止时间早一个同步周期（6h）仍可接受，早更多则不可。
+func TestListRankingsAcceptsBaselineWithinOneSyncInterval(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	seedPublicRepo(t, store, 952, "acme", "edge", 130)
+	seedPublicRepo(t, store, 953, "acme", "too-old", 130)
+	seedRankSnapshot(t, store, 952, 100, now.Add(-30*time.Hour))
+	seedRankSnapshot(t, store, 952, 130, now.Add(-1*time.Hour))
+	seedRankSnapshot(t, store, 953, 100, now.Add(-31*time.Hour))
+	seedRankSnapshot(t, store, 953, 130, now.Add(-1*time.Hour))
+	handler := newTestHandler(t, store)
+
+	recorder := request(t, handler, http.MethodGet, "/api/v1/rankings?type=24h")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	payload := decodeRankings(t, recorder)
+	if payload.Data.Meta.Total != 1 || len(payload.Data.Items) != 1 {
+		t.Fatalf("total=%d items=%d, want only acme/edge", payload.Data.Meta.Total, len(payload.Data.Items))
+	}
+	item := payload.Data.Items[0]
+	if item.FullName != "acme/edge" || item.StarDelta == nil || *item.StarDelta != 30 {
+		t.Fatalf("item = %+v, want acme/edge +30", item)
+	}
+	if !payload.Data.Meta.HistoryAvailable {
+		t.Fatal("history_available must be true when a baseline sits inside the band")
 	}
 }
