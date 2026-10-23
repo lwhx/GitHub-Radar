@@ -1,0 +1,11 @@
+.git
+.github
+**/node_modules
+frontend/dist
+data
+backend/data
+backend/radar
+backend/*.exe
+docs/superpowers
+*.md
+!README.md

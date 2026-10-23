@@ -1,0 +1,86 @@
+export interface PublicStats {
+  repositories: number
+  star_snapshots: number
+  categories: number
+  latest_sync_at: string | null
+  data_updated_at: string | null
+}
+
+export interface AdminOverview {
+  repository_count: number
+  snapshot_count: number
+  category_count: number
+  admin_count: number
+  active_session_count: number
+  database_ready: boolean
+}
+
+export interface AdminUser {
+  username: string
+}
+
+export interface RateLimitSnapshot {
+  resource: 'core' | 'search' | string
+  limit: number
+  used: number
+  remaining: number
+  reset_at: string
+  cooldown_until: string | null
+}
+
+export interface GitHubCredential {
+  id: number
+  label: string
+  auth_identity: string
+  auth_login: string
+  token_hint: string
+  enabled: boolean
+  status: string
+  priority: number
+  last_checked_at: string | null
+  created_at: string
+  updated_at: string
+  rate_limits?: RateLimitSnapshot[]
+}
+
+export interface CredentialsResponse {
+  credentials: GitHubCredential[]
+}
+
+export interface CollectorJob {
+  id: number
+  job_type: string
+  enabled: boolean
+  interval_seconds: number
+  next_run_at: string | null
+  lease_owner: string | null
+  lease_expires_at: string | null
+}
+
+export interface JobRun {
+  id: number
+  job_id: number
+  status: string
+  trigger: string
+  started_at: string
+  finished_at: string | null
+  request_count: number
+  created_count: number
+  updated_count: number
+  snapshot_count: number
+  not_modified_count: number
+  retry_count: number
+  rate_limited_count: number
+  failed_count: number
+  coverage_incomplete_count: number
+  last_error_code: string | null
+  error_summary: string | null
+}
+
+export interface JobsResponse {
+  jobs: CollectorJob[]
+}
+
+export interface JobRunsResponse {
+  runs: JobRun[]
+}
