@@ -254,11 +254,13 @@ func loadMigrations(migrationFiles fs.FS) ([]migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read migration %q: %w", entry.Name(), err)
 		}
-		digest := sha256.Sum256(contents)
+		normalizedSQL := strings.ReplaceAll(string(contents), "\r\n", "\n")
+		normalizedSQL = strings.ReplaceAll(normalizedSQL, "\r", "\n")
+		digest := sha256.Sum256([]byte(normalizedSQL))
 		list = append(list, migration{
 			version:  version,
 			name:     entry.Name(),
-			sql:      string(contents),
+			sql:      normalizedSQL,
 			checksum: hex.EncodeToString(digest[:]),
 		})
 	}

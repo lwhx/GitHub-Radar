@@ -173,6 +173,44 @@ func TestSchemaMigrationsRecordsChecksumAndCanonicalTime(t *testing.T) {
 	}
 }
 
+func TestLoadMigrationsNormalizesLineEndingsForChecksum(t *testing.T) {
+	loadMigration := func(t *testing.T, contents string) migration {
+		t.Helper()
+		list, err := loadMigrations(fstest.MapFS{
+			"0001_create.sql": &fstest.MapFile{Data: []byte(contents)},
+		})
+		if err != nil {
+			t.Fatalf("loadMigrations() error = %v", err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("loadMigrations() returned %d migrations, want 1", len(list))
+		}
+		return list[0]
+	}
+
+	const lfSQL = "CREATE TABLE sample (\n	id INTEGER PRIMARY KEY\n);\n"
+	lfMigration := loadMigration(t, lfSQL)
+	for name, contents := range map[string]string{
+		"CRLF": strings.ReplaceAll(lfSQL, "\n", "\r\n"),
+		"CR":   strings.ReplaceAll(lfSQL, "\n", "\r"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := loadMigration(t, contents)
+			if got.checksum != lfMigration.checksum {
+				t.Errorf("checksum = %q, want LF checksum %q", got.checksum, lfMigration.checksum)
+			}
+			if got.sql != lfSQL {
+				t.Errorf("SQL = %q, want normalized SQL %q", got.sql, lfSQL)
+			}
+		})
+	}
+
+	changed := loadMigration(t, strings.Replace(lfSQL, "id INTEGER", "id TEXT", 1))
+	if changed.checksum == lfMigration.checksum {
+		t.Error("checksum did not change when migration contents changed")
+	}
+}
+
 func TestLoadMigrationsRejectsNonPositiveAndDuplicateVersions(t *testing.T) {
 	for _, test := range []struct {
 		name  string
