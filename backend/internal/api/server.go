@@ -49,6 +49,7 @@ type Config struct {
 	Credentials   credentialService
 	Scheduler     schedulerService
 	Readmes       readmeService
+	Settings      settingsService
 	PublicBaseURL string
 	CookieSecure  bool
 	StaticDir     string
@@ -101,6 +102,9 @@ func New(config Config) http.Handler {
 	router.Patch("/api/v1/admin/categories/{id}", s.updateAdminCategory)
 	router.Delete("/api/v1/admin/categories/{id}", s.deleteAdminCategory)
 	router.Get("/api/v1/admin/jobs", s.listJobs)
+	router.Get("/api/v1/admin/settings", s.getAdminSettings)
+	router.Patch("/api/v1/admin/settings", s.updateAdminSettings)
+	router.Get("/api/v1/admin/audit-logs", s.listAuditLogs)
 	router.Post("/api/v1/admin/jobs/run", s.runJob)
 	router.Patch("/api/v1/admin/jobs/{id}", s.updateJob)
 	router.Get("/api/v1/admin/job-runs", s.listJobRuns)

@@ -428,6 +428,51 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 - 重新启用时会把 `next_run_at` 重排为「当前时间 + 周期」，避免停用期间积压的旧时间点触发立即补跑；租约字段不受影响；
 - 审计日志记录 `admin.job.update`。
 
+### `GET /api/v1/admin/settings`
+
+返回脱敏后的站点设置快照（需要管理员会话）：
+
+```json
+{
+  "data": {
+    "site_name": "GitHub Radar",
+    "site_description": "",
+    "timezone": "UTC",
+    "default_page_size": 20,
+    "ai_enabled": false,
+    "ai_base_url": "",
+    "ai_model": "",
+    "has_ai_api_key": false
+  }
+}
+```
+
+`ai_api_key` **永不回传**，只暴露 `has_ai_api_key`；存储使用 `APP_ENCRYPTION_KEY` 加密（AI 配置当前仅做存储，P2 接入时启用）。
+
+### `PATCH /api/v1/admin/settings`
+
+局部更新（至少一个字段，需要合法 Origin、会话和 CSRF）：
+
+```json
+{ "site_name": "雷达站", "timezone": "Asia/Shanghai", "default_page_size": 50, "ai_enabled": true, "ai_api_key": "sk-..." }
+```
+
+- 校验：时区必须是 IANA 名称、`default_page_size` 10–100、`site_name` 1–80 字、`site_description` ≤ 500 字、`ai_base_url` 必须是 http(s) 绝对地址；非法返回 `400 INVALID_SETTINGS`；
+- `ai_api_key` 语义：**省略 = 保持不变**，空字符串 = 清除；非法返回 `400 INVALID_SETTINGS`；
+- 成功返回更新后的脱敏快照；审计 `admin.settings.update`（成功/失败都记）。
+
+### `GET /api/v1/admin/audit-logs?limit=50&action=`
+
+操作日志（需要管理员会话），按时间倒序：
+
+```json
+{ "data": { "items": [ { "id": 9, "admin_id": 1, "action": "admin.settings.update", "target": "site", "result": "success", "created_at": "2026-10-24T12:00:00Z", "request_id": "..." } ] } }
+```
+
+- `limit` 1–200，缺省 50，越界返回 `400 INVALID_LIMIT`；
+- `action` 可选精确过滤（如 `admin.category.delete`）；
+- 日志由所有管理端写操作自动写入，`admin_id` 在管理员被删除后为 `null`（`ON DELETE SET NULL`），历史保留。
+
 ### `GET /api/v1/admin/job-runs?limit=50`
 
 返回最近运行，包含触发来源，以及请求、新增、更新、详情快照、304、重试、限流、失败和覆盖不完整计数。运行状态包括 `running`、`completed`、`failed` 和 `deferred`；详情同步遇到 GitHub 主/次限流时使用 `deferred`，按 `RetryAt` 重排任务且不增加仓库失败次数。`limit` 有效范围为 1–200，缺省或越界时使用 50。

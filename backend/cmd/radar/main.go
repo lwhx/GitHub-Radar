@@ -24,6 +24,7 @@ import (
 	"github.com/github-radar/github-radar/internal/db"
 	"github.com/github-radar/github-radar/internal/readmes"
 	"github.com/github-radar/github-radar/internal/scheduler"
+	"github.com/github-radar/github-radar/internal/settings"
 	"golang.org/x/term"
 )
 
@@ -101,6 +102,11 @@ func runServe(ctx context.Context, output io.Writer) error {
 	}
 	jobScheduler := scheduler.New(store.SQL(), searcherSource, repositorySource)
 	readmeService := readmes.NewService(store.SQL(), readmes.NewGitHubProvider(credentialService, cfg.GitHubAPIBaseURL), time.Now, logger)
+	settingsCipher, err := credentials.NewCipher(cfg.EncryptionKey, nil)
+	if err != nil {
+		return fmt.Errorf("initialize settings cipher: %w", err)
+	}
+	siteSettings := settings.NewService(store.SQL(), settingsCipher, time.Now)
 	if err := jobScheduler.EnsureJob(ctx); err != nil {
 		return err
 	}
@@ -114,7 +120,7 @@ func runServe(ctx context.Context, output io.Writer) error {
 
 	server := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, Readmes: readmeService, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
+		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, Readmes: readmeService, Settings: siteSettings, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
 	}
