@@ -1,6 +1,6 @@
 # GitHub Radar P1.1 设计说明
 
-> 日期：2026-10-23  
+> 日期：2026-10-23
 > 需求基线：`github-radar-spec-v1.0.md` 与 `github-radar-ai-kickoff.md`
 
 ## 范围
