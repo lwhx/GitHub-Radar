@@ -4,12 +4,268 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/github-radar/github-radar/migrations"
 )
+
+func TestP12CollectorMigrationAddsRequiredState(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "radar.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	for table, expected := range map[string][]string{
+		"repositories":       {"visibility", "etag", "next_sync_at", "last_error_code", "consecutive_failures"},
+		"github_credentials": {"priority", "auth_login", "created_at", "updated_at", "last_error_code"},
+		"api_rate_limits":    {"used", "cooldown_reason"},
+		"collection_windows": {"job_run_id", "parent_id", "split_depth", "attempt_count", "next_attempt_at", "total_count", "incomplete_results", "next_url", "created_at", "updated_at", "completed_at"},
+		"collector_jobs":     {"lease_owner", "lease_expires_at"},
+		"job_runs":           {"trigger", "heartbeat_at", "retry_count", "rate_limited_count", "failed_count", "coverage_incomplete_count", "last_error_code", "snapshot_count", "not_modified_count"},
+	} {
+		columns := schemaColumns(t, store.SQL(), table)
+		for _, column := range expected {
+			if !columns[column] {
+				t.Errorf("%s missing column %s", table, column)
+			}
+		}
+	}
+	var eventTableCount int
+	if err := store.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'job_run_events'`).Scan(&eventTableCount); err != nil {
+		t.Fatalf("query job_run_events: %v", err)
+	}
+	if eventTableCount != 1 {
+		t.Errorf("job_run_events table count = %d", eventTableCount)
+	}
+}
+
+func TestCollectionWindowsRejectDuplicateLogicalRangeAfterPageAdvance(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "radar.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	const insertWindow = `INSERT INTO collection_windows
+		(source, query_hash, time_from, time_to, page, coverage_status)
+		VALUES ('github_search', 'created-public-v1', '2026-10-22T00:00:00Z', '2026-10-23T00:00:00Z', ?, 'pending')`
+	if _, err := store.SQL().Exec(insertWindow, 2); err != nil {
+		t.Fatalf("insert advanced window: %v", err)
+	}
+	if _, err := store.SQL().Exec(insertWindow, 1); err == nil {
+		t.Fatal("duplicate logical window insert succeeded, want unique constraint error")
+	}
+}
+
+func TestCollectionWindowLogicalIdentityMigrationReconcilesDuplicates(t *testing.T) {
+	t.Parallel()
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "radar.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	if err := migrateFS(context.Background(), sqlDB, migrationFilesThrough(t, "0003_")); err != nil {
+		t.Fatalf("migrate through version 3: %v", err)
+	}
+
+	const insertWindow = `INSERT INTO collection_windows
+		(source, query_hash, time_from, time_to, page, coverage_status, created_at, updated_at)
+		VALUES ('github_search', 'created-public-v1', '2026-10-22T00:00:00Z', '2026-10-23T00:00:00Z', ?, 'pending', '2026-10-23T00:00:00Z', ?)`
+	advanced, err := sqlDB.Exec(insertWindow, 3, "2026-10-23T00:03:00Z")
+	if err != nil {
+		t.Fatalf("insert advanced duplicate: %v", err)
+	}
+	advancedID, _ := advanced.LastInsertId()
+	stale, err := sqlDB.Exec(insertWindow, 1, "2026-10-23T00:01:00Z")
+	if err != nil {
+		t.Fatalf("insert stale duplicate: %v", err)
+	}
+	staleID, _ := stale.LastInsertId()
+	if _, err := sqlDB.Exec(`INSERT INTO collector_jobs(job_type, interval_seconds) VALUES ('test', 60)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO job_runs(job_id, started_at, status) VALUES (1, '2026-10-23T00:00:00Z', 'running')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO job_run_events(run_id, window_id, occurred_at, level, event_code, message)
+		VALUES (1, ?, '2026-10-23T00:02:00Z', 'info', 'test', 'duplicate reference')`, staleID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrateFS(context.Background(), sqlDB, migrations.Files); err != nil {
+		t.Fatalf("migrate duplicate logical windows: %v", err)
+	}
+	var windowID int64
+	var page, count int
+	if err := sqlDB.QueryRow(`SELECT id, page, COUNT(*) OVER () FROM collection_windows
+		WHERE source = 'github_search' AND query_hash = 'created-public-v1'
+			AND time_from = '2026-10-22T00:00:00Z' AND time_to = '2026-10-23T00:00:00Z'`).Scan(&windowID, &page, &count); err != nil {
+		t.Fatal(err)
+	}
+	if windowID != advancedID || page != 3 || count != 1 {
+		t.Fatalf("reconciled window = id %d page %d count %d, want id %d page 3 count 1", windowID, page, count, advancedID)
+	}
+	var eventWindowID int64
+	if err := sqlDB.QueryRow(`SELECT window_id FROM job_run_events WHERE event_code = 'test'`).Scan(&eventWindowID); err != nil {
+		t.Fatal(err)
+	}
+	if eventWindowID != advancedID {
+		t.Fatalf("event window id = %d, want keeper %d", eventWindowID, advancedID)
+	}
+}
+
+func TestCollectionWindowLogicalIdentityMigrationPrefersMostAdvancedWindow(t *testing.T) {
+	t.Parallel()
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "radar.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := migrateFS(context.Background(), sqlDB, migrationFilesThrough(t, "0003_")); err != nil {
+		t.Fatalf("migrate through version 3: %v", err)
+	}
+
+	const insertWindow = `INSERT INTO collection_windows
+		(source, query_hash, time_from, time_to, page, coverage_status, next_url, attempt_count, created_at, updated_at)
+		VALUES ('github_search', 'created-public-v1', '2026-10-22T00:00:00Z', '2026-10-23T00:00:00Z', ?, ?, ?, ?, '2026-10-23T00:00:00Z', ?)`
+	var ids []int64
+	for index, row := range []struct {
+		page    int
+		status  string
+		nextURL any
+		attempt int
+	}{
+		{page: 9, status: "coverage_incomplete", nextURL: nil, attempt: 3},
+		{page: 1, status: "completed", nextURL: nil, attempt: 0},
+		{page: 5, status: "split", nextURL: nil, attempt: 0},
+		{page: 2, status: "pending", nextURL: "https://api.github.com/search/repositories?page=3", attempt: 1},
+	} {
+		updatedAt := fmt.Sprintf("2026-10-23T00:00:%02dZ", index)
+		result, err := sqlDB.Exec(insertWindow, row.page, row.status, row.nextURL, row.attempt, updatedAt)
+		if err != nil {
+			t.Fatalf("insert %s duplicate: %v", row.status, err)
+		}
+		id, _ := result.LastInsertId()
+		ids = append(ids, id)
+	}
+
+	if err := migrateFS(context.Background(), sqlDB, migrations.Files); err != nil {
+		t.Fatalf("migrate duplicate logical windows: %v", err)
+	}
+	var windowID int64
+	var status string
+	var count int
+	if err := sqlDB.QueryRow(`SELECT id, coverage_status, COUNT(*) OVER () FROM collection_windows
+		WHERE source = 'github_search' AND query_hash = 'created-public-v1'`).Scan(&windowID, &status, &count); err != nil {
+		t.Fatal(err)
+	}
+	if windowID != ids[1] || status != "completed" || count != 1 {
+		t.Fatalf("reconciled window = id %d status %q count %d, want id %d completed count 1", windowID, status, count, ids[1])
+	}
+}
+
+func TestCollectionWindowLogicalIdentityMigrationRedirectsChildParents(t *testing.T) {
+	t.Parallel()
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "radar.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	if err := migrateFS(context.Background(), sqlDB, migrationFilesThrough(t, "0003_")); err != nil {
+		t.Fatalf("migrate through version 3: %v", err)
+	}
+
+	const insertWindow = `INSERT INTO collection_windows
+		(source, query_hash, time_from, time_to, page, coverage_status, parent_id, split_depth, created_at, updated_at)
+		VALUES ('github_search', 'created-public-v1', ?, ?, ?, ?, ?, ?, '2026-10-23T00:00:00Z', '2026-10-23T00:00:00Z')`
+	advanced, err := sqlDB.Exec(insertWindow, "2026-10-22T00:00:00Z", "2026-10-23T00:00:00Z", 3, "split", nil, 0)
+	if err != nil {
+		t.Fatalf("insert advanced parent: %v", err)
+	}
+	parentID, _ := advanced.LastInsertId()
+	if _, err := sqlDB.Exec(insertWindow, "2026-10-22T00:00:00Z", "2026-10-23T00:00:00Z", 1, "pending", nil, 0); err != nil {
+		t.Fatalf("insert stale duplicate parent: %v", err)
+	}
+	stale, err := sqlDB.Exec(insertWindow, "2026-10-22T12:00:00Z", "2026-10-23T00:00:00Z", 1, "pending", parentID+1, 1)
+	if err != nil {
+		t.Fatalf("insert child with duplicate parent: %v", err)
+	}
+	childID, _ := stale.LastInsertId()
+
+	if err := migrateFS(context.Background(), sqlDB, migrations.Files); err != nil {
+		t.Fatalf("migrate duplicate logical windows: %v", err)
+	}
+	var storedParent int64
+	if err := sqlDB.QueryRow(`SELECT parent_id FROM collection_windows WHERE id = ?`, childID).Scan(&storedParent); err != nil {
+		t.Fatal(err)
+	}
+	if storedParent != parentID {
+		t.Fatalf("child parent_id = %d, want keeper %d", storedParent, parentID)
+	}
+}
+
+func migrationFilesThrough(t *testing.T, lastPrefix string) fstest.MapFS {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.Files, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := fstest.MapFS{}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() > lastPrefix+"~" {
+			continue
+		}
+		contents, err := fs.ReadFile(migrations.Files, entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[entry.Name()] = &fstest.MapFile{Data: contents}
+	}
+	return files
+}
+
+func schemaColumns(t *testing.T, database *sql.DB, table string) map[string]bool {
+	t.Helper()
+	rows, err := database.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var sequence, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue any
+		if err := rows.Scan(&sequence, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read table_info(%s): %v", table, err)
+	}
+	return columns
+}
 
 func TestSQLiteDSNEscapesWindowsDriveAndUNCPaths(t *testing.T) {
 	for _, test := range []struct {
