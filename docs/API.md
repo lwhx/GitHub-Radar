@@ -54,6 +54,67 @@ curl -i http://127.0.0.1:8080/healthz
 
 `latest_sync_at` / `data_updated_at` 为 null 表示尚无采集数据，前端应显示空态而不是 0。
 
+### `GET /api/v1/repos`
+
+公开仓库列表：本地搜索、固定枚举排序、分页。隐藏仓库（`is_hidden`）永不出现在结果中。
+
+| 参数 | 说明 |
+| --- | --- |
+| `q` | 可选；对 `full_name` 与 `description` 做子串匹配（`%`/`_`/`\` 自动转义） |
+| `sort` | 默认 `stars_desc`；可选 `stars_desc`、`stars_asc`、`created_desc`、`updated_desc` |
+| `page` | 默认 `1`；非正整数返回 `400 INVALID_PAGE` |
+| `limit` | 默认 `20`，上限 `100`；越界返回 `400 INVALID_LIMIT` |
+
+```bash
+curl -i 'http://127.0.0.1:8080/api/v1/repos?q=agent&sort=stars_desc&page=1&limit=20'
+```
+
+```json
+{
+  "data": {
+    "items": [
+      {
+        "full_name": "acme/agent-framework",
+        "owner": "acme",
+        "name": "agent-framework",
+        "html_url": "https://github.com/acme/agent-framework",
+        "homepage_url": null,
+        "description": "Build AI agents",
+        "language": "Go",
+        "license_spdx": "MIT",
+        "topics": [],
+        "stars_count": 120,
+        "forks_count": 8,
+        "open_issues_count": 3,
+        "is_fork": false,
+        "is_archived": false,
+        "github_created_at": "2026-10-01T00:00:00Z",
+        "github_updated_at": "2026-10-20T00:00:00Z",
+        "pushed_at": null,
+        "first_seen_at": "2026-10-02T00:00:00Z",
+        "last_synced_at": null
+      }
+    ],
+    "meta": {
+      "total": 1,
+      "page": 1,
+      "limit": 20,
+      "data_updated_at": null
+    }
+  }
+}
+```
+
+`meta.data_updated_at` 为全部可见仓库的最近同步时间，null 表示尚无同步。
+
+### `GET /api/v1/repos/{owner}/{repo}`
+
+仓库详情，字段同列表项。owner/name 不区分大小写（与 GitHub 一致）；未知仓库、隐藏仓库均返回 `404 REPO_NOT_FOUND`。
+
+```bash
+curl -i http://127.0.0.1:8080/api/v1/repos/acme/agent-framework
+```
+
 ## 认证接口
 
 ### `POST /api/v1/admin/auth/login`
