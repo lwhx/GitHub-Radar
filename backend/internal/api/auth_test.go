@@ -14,6 +14,7 @@ import (
 
 	"github.com/github-radar/github-radar/internal/auth"
 	"github.com/github-radar/github-radar/internal/db"
+	"github.com/github-radar/github-radar/internal/settings"
 )
 
 const testPassword = "correct horse battery staple"
@@ -186,6 +187,32 @@ func TestLoginRateLimitUsesRemoteIPAndSuccessClearsFailures(t *testing.T) {
 		if recorder.Code != http.StatusUnauthorized {
 			t.Fatalf("post-reset attempt %d status = %d", attempt+1, recorder.Code)
 		}
+	}
+}
+
+func TestClientIPTrustsForwardedChainOnlyFromConfiguredPeers(t *testing.T) {
+	tests := []struct {
+		name      string
+		remote    string
+		forwarded string
+		trusted   []string
+		want      string
+	}{
+		{name: "untrusted peer ignores spoofed header", remote: "192.0.2.10:443", forwarded: "203.0.113.9", trusted: []string{"10.0.0.0/8"}, want: "192.0.2.10"},
+		{name: "trusted direct proxy", remote: "127.0.0.1:8080", forwarded: "203.0.113.9", trusted: []string{"127.0.0.1"}, want: "203.0.113.9"},
+		{name: "trusted proxy chain walks right to left", remote: "10.0.0.2:8080", forwarded: "198.51.100.7, 10.0.0.9", trusted: []string{"10.0.0.0/8"}, want: "198.51.100.7"},
+		{name: "invalid chain fails closed", remote: "127.0.0.1:8080", forwarded: "not-an-ip", trusted: []string{"127.0.0.1"}, want: "127.0.0.1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			instance := &server{config: Config{Settings: &fakeSettings{snapshot: settings.Snapshot{TrustedProxies: test.trusted}}, Logger: slog.Default()}}
+			request := httptest.NewRequest(http.MethodPost, "http://radar.test/api/v1/admin/auth/login", nil)
+			request.RemoteAddr = test.remote
+			request.Header.Set("X-Forwarded-For", test.forwarded)
+			if got := instance.clientIP(request); got != test.want {
+				t.Fatalf("clientIP() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

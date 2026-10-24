@@ -165,3 +165,44 @@ export interface JobsResponse {
 export interface JobRunsResponse {
   runs: JobRun[]
 }
+
+export interface AdminSettings {
+  site_name: string
+  site_description: string
+  timezone: string
+  default_page_size: number
+  ai_enabled: boolean
+  ai_base_url: string
+  ai_model: string
+  has_ai_api_key: boolean
+  trusted_proxies: string[]
+}
+
+export interface BackupRecord {
+  name: string
+  kind: 'manual' | 'daily' | 'weekly'
+  created_at: string
+  size_bytes: number
+  sha256: string
+  verified: boolean
+  download_url: string
+}
+
+export interface BackupsResponse {
+  items: BackupRecord[]
+  retention: { daily: number; weekly: number }
+}
+
+export interface AuditLog {
+  id: number
+  admin_id: number | null
+  action: string
+  target: string
+  result: string
+  created_at: string
+  request_id: string | null
+}
+
+export interface AuditLogsResponse {
+  items: AuditLog[]
+}

@@ -442,7 +442,8 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
     "ai_enabled": false,
     "ai_base_url": "",
     "ai_model": "",
-    "has_ai_api_key": false
+    "has_ai_api_key": false,
+    "trusted_proxies": []
   }
 }
 ```
@@ -457,7 +458,7 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 { "site_name": "雷达站", "timezone": "Asia/Shanghai", "default_page_size": 50, "ai_enabled": true, "ai_api_key": "sk-..." }
 ```
 
-- 校验：时区必须是 IANA 名称、`default_page_size` 10–100、`site_name` 1–80 字、`site_description` ≤ 500 字、`ai_base_url` 必须是 http(s) 绝对地址；非法返回 `400 INVALID_SETTINGS`；
+- 校验：时区必须是 IANA 名称、`default_page_size` 10–100、`site_name` 1–80 字、`site_description` ≤ 500 字、`ai_base_url` 必须是 http(s) 绝对地址；`trusted_proxies` 最多 32 个 IP/CIDR（自动规范化与去重）；非法返回 `400 INVALID_SETTINGS`；
 - `ai_api_key` 语义：**省略 = 保持不变**，空字符串 = 清除；非法返回 `400 INVALID_SETTINGS`；
 - 成功返回更新后的脱敏快照；审计 `admin.settings.update`（成功/失败都记）。
 
@@ -472,6 +473,22 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 - `limit` 1–200，缺省 50，越界返回 `400 INVALID_LIMIT`；
 - `action` 可选精确过滤（如 `admin.category.delete`）；
 - 日志由所有管理端写操作自动写入，`admin_id` 在管理员被删除后为 `null`（`ON DELETE SET NULL`），历史保留。
+
+### `GET /api/v1/admin/backups`
+
+列出受管理的 SQLite 备份（需要管理员会话），响应包含文件名、类型、UTC 创建时间、字节数、SHA-256 和下载地址；同时返回保留策略 `daily: 7`、`weekly: 4`。应用每小时检查一次窗口，缺少最近 24 小时日备或最近 7 天周备时自动使用 `VACUUM INTO` 创建，手动备份不自动删除。
+
+### `POST /api/v1/admin/backups`
+
+创建在线一致性的手动备份，需要合法 Origin、管理员会话和 CSRF。成功返回 `201`，创建后立即执行 SQLite `PRAGMA quick_check`；失败文件会删除，并写 `admin.backup.create` 审计。
+
+### `POST /api/v1/admin/backups/{name}/verify`
+
+重新执行完整性预检，需要合法 Origin、管理员会话和 CSRF。成功返回 `{ "verified": true }`；损坏返回 `422`。该操作写 `admin.backup.verify` 审计。
+
+### `GET /api/v1/admin/backups/{name}`
+
+下载备份（需要管理员会话）。仅接受服务生成的严格文件名，拒绝目录穿越；响应类型为 `application/vnd.sqlite3` 且强制附件下载。
 
 ### `GET /api/v1/admin/job-runs?limit=50`
 
@@ -496,12 +513,3 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
   }
 }
 ```
-
-## 尚未实现的接口（P1.3+）
-
-规格中定义的以下接口**当前未注册**，调用会返回 `404 NOT_FOUND`：
-
-- `/api/v1/rankings`、`/api/v1/repos…`、`/api/v1/categories…`（P1.3）
-- `/api/v1/admin/categories…`、`/api/v1/admin/settings`、`/api/v1/admin/audit-logs`、`/api/v1/admin/backups`（P1.4）
-
-把它们当作已实现是阶段验收的违规项；实现进度以 `README.md` 功能矩阵为准。

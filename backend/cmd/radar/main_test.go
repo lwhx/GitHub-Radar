@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -90,7 +92,7 @@ func TestAdminCreateRejectsPasswordMismatchAndDuplicate(t *testing.T) {
 	}
 }
 
-func TestRunDispatchesServeHealthcheckAndAdminCreate(t *testing.T) {
+func TestRunDispatchesCommands(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		args []string
@@ -99,6 +101,7 @@ func TestRunDispatchesServeHealthcheckAndAdminCreate(t *testing.T) {
 		{name: "serve", args: []string{"serve"}, want: "serve"},
 		{name: "healthcheck", args: []string{"healthcheck"}, want: "healthcheck"},
 		{name: "admin create", args: []string{"admin", "create"}, want: "admin"},
+		{name: "backup", args: []string{"backup"}, want: "backup"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			called := ""
@@ -106,6 +109,7 @@ func TestRunDispatchesServeHealthcheckAndAdminCreate(t *testing.T) {
 				serve:       func(context.Context, io.Writer) error { called = "serve"; return nil },
 				healthcheck: func(context.Context) error { called = "healthcheck"; return nil },
 				adminCreate: func(context.Context, io.Reader, io.Writer, passwordReader) error { called = "admin"; return nil },
+				backup:      func(context.Context, io.Writer) error { called = "backup"; return nil },
 			}
 			if err := runWithDeps(context.Background(), test.args, strings.NewReader(""), io.Discard, nil, deps); err != nil {
 				t.Fatalf("runWithDeps() error = %v", err)
@@ -123,11 +127,30 @@ func TestRunRejectsExtraArgumentsAndUsageListsCommands(t *testing.T) {
 		if err == nil {
 			t.Fatalf("args %v unexpectedly succeeded", args)
 		}
-		for _, command := range []string{"serve", "healthcheck", "admin create"} {
+		for _, command := range []string{"serve", "healthcheck", "admin create", "backup"} {
 			if !strings.Contains(err.Error(), command) {
 				t.Errorf("usage %q missing %q", err, command)
 			}
 		}
+	}
+}
+
+func TestRunBackupCreatesVerifiedFile(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "radar.db")
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("DATABASE_PATH", databasePath)
+	var output bytes.Buffer
+	if err := runBackup(context.Background(), &output); err != nil {
+		t.Fatalf("runBackup() error = %v", err)
+	}
+	fields := strings.Fields(output.String())
+	if len(fields) != 4 || !strings.HasPrefix(fields[0], "radar-manual-") || !strings.HasPrefix(fields[3], "sha256:") {
+		t.Fatalf("output = %q", output.String())
+	}
+	info, err := os.Stat(filepath.Join(root, "backups", fields[0]))
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("backup stat = %+v, %v", info, err)
 	}
 }
 

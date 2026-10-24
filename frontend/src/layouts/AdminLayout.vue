@@ -51,12 +51,7 @@ async function onLogout() {
           <RouterLink class="rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-bg hover:text-fg" active-class="bg-bg text-fg" :to="{ name: 'admin-credentials' }">凭据管理</RouterLink>
           <RouterLink class="rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-bg hover:text-fg" active-class="bg-bg text-fg" :to="{ name: 'admin-jobs' }">采集任务</RouterLink>
           <RouterLink class="rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-bg hover:text-fg" active-class="bg-bg text-fg" :to="{ name: 'admin-categories' }">分类管理</RouterLink>
-          <span class="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm text-muted" aria-disabled="true">
-            系统设置<span class="rounded bg-card px-1.5 py-0.5 text-xs">P1.4</span>
-          </span>
-          <span class="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm text-muted" aria-disabled="true">
-            备份恢复<span class="rounded bg-card px-1.5 py-0.5 text-xs">P1.4</span>
-          </span>
+          <RouterLink class="rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-bg hover:text-fg" active-class="bg-bg text-fg" :to="{ name: 'admin-operations' }">系统运维</RouterLink>
         </nav>
       </aside>
 

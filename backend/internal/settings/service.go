@@ -3,8 +3,10 @@ package settings
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -28,14 +30,15 @@ const (
 
 // Snapshot 是脱敏后的完整设置视图；密钥永不回传，只暴露存在性。
 type Snapshot struct {
-	SiteName        string `json:"site_name"`
-	SiteDescription string `json:"site_description"`
-	Timezone        string `json:"timezone"`
-	DefaultPageSize int    `json:"default_page_size"`
-	AIEnabled       bool   `json:"ai_enabled"`
-	AIBaseURL       string `json:"ai_base_url"`
-	AIModel         string `json:"ai_model"`
-	HasAIAPIKey     bool   `json:"has_ai_api_key"`
+	SiteName        string   `json:"site_name"`
+	SiteDescription string   `json:"site_description"`
+	Timezone        string   `json:"timezone"`
+	DefaultPageSize int      `json:"default_page_size"`
+	AIEnabled       bool     `json:"ai_enabled"`
+	AIBaseURL       string   `json:"ai_base_url"`
+	AIModel         string   `json:"ai_model"`
+	HasAIAPIKey     bool     `json:"has_ai_api_key"`
+	TrustedProxies  []string `json:"trusted_proxies"`
 }
 
 // Update 是局部更新载荷；nil 表示保持不变。AIAPIKey 特殊：nil 保留，空串清除。
@@ -48,6 +51,7 @@ type Update struct {
 	AIBaseURL       *string
 	AIModel         *string
 	AIAPIKey        *string
+	TrustedProxies  *[]string
 }
 
 // Service 读写 site_settings，负责默认值、校验与 AI Key 加密。
@@ -74,6 +78,7 @@ func (service *Service) Get(ctx context.Context) (Snapshot, error) {
 		SiteName:        defaultSiteName,
 		Timezone:        defaultTimezone,
 		DefaultPageSize: defaultPageSize,
+		TrustedProxies:  []string{},
 	}
 	if value, ok := values["site_name"]; ok {
 		snapshot.SiteName = value
@@ -98,6 +103,11 @@ func (service *Service) Get(ctx context.Context) (Snapshot, error) {
 	}
 	if value, ok := values["ai_api_key"]; ok && value != "" {
 		snapshot.HasAIAPIKey = true
+	}
+	if value, ok := values["trusted_proxies"]; ok && value != "" {
+		if err := json.Unmarshal([]byte(value), &snapshot.TrustedProxies); err != nil {
+			return Snapshot{}, fmt.Errorf("decode trusted proxies: %w", err)
+		}
 	}
 	return snapshot, nil
 }
@@ -151,6 +161,35 @@ func (service *Service) Update(ctx context.Context, update Update) (Snapshot, er
 	if update.AIModel != nil {
 		next.AIModel = strings.TrimSpace(*update.AIModel)
 	}
+	if update.TrustedProxies != nil {
+		if len(*update.TrustedProxies) > 32 {
+			return Snapshot{}, fmt.Errorf("%w: trusted_proxies accepts at most 32 entries", ErrInvalidSettings)
+		}
+		next.TrustedProxies = make([]string, 0, len(*update.TrustedProxies))
+		seen := map[string]struct{}{}
+		for _, raw := range *update.TrustedProxies {
+			value := strings.TrimSpace(raw)
+			if value == "" {
+				continue
+			}
+			canonical := ""
+			if prefix, err := netip.ParsePrefix(value); err == nil {
+				canonical = prefix.Masked().String()
+			} else if address, err := netip.ParseAddr(value); err == nil {
+				canonical = address.Unmap().String()
+			} else {
+				return Snapshot{}, fmt.Errorf("%w: trusted proxy %q must be an IP address or CIDR", ErrInvalidSettings, value)
+			}
+			if _, exists := seen[canonical]; !exists {
+				next.TrustedProxies = append(next.TrustedProxies, canonical)
+				seen[canonical] = struct{}{}
+			}
+		}
+	}
+	trustedProxiesJSON, err := json.Marshal(next.TrustedProxies)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("encode trusted proxies: %w", err)
+	}
 
 	writes := map[string]string{
 		"site_name":         next.SiteName,
@@ -160,6 +199,7 @@ func (service *Service) Update(ctx context.Context, update Update) (Snapshot, er
 		"ai_enabled":        fmt.Sprintf("%t", next.AIEnabled),
 		"ai_base_url":       next.AIBaseURL,
 		"ai_model":          next.AIModel,
+		"trusted_proxies":   string(trustedProxiesJSON),
 	}
 	for key, value := range writes {
 		if err := service.write(ctx, key, value); err != nil {

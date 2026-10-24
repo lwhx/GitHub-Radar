@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -39,6 +40,9 @@ func TestGetReturnsDefaultsWhenEmpty(t *testing.T) {
 	}
 	if snapshot.AIEnabled || snapshot.HasAIAPIKey {
 		t.Fatalf("AI should be off by default: %+v", snapshot)
+	}
+	if snapshot.TrustedProxies == nil || len(snapshot.TrustedProxies) != 0 {
+		t.Fatalf("trusted proxies default = %#v, want empty array", snapshot.TrustedProxies)
 	}
 }
 
@@ -132,8 +136,26 @@ func TestUpdateRejectsInvalidValues(t *testing.T) {
 	if _, err := service.Update(ctx, Update{AIBaseURL: strPtr("ftp://x")}); !errors.Is(err, ErrInvalidSettings) {
 		t.Fatalf("bad base url error = %v, want ErrInvalidSettings", err)
 	}
+	if _, err := service.Update(ctx, Update{TrustedProxies: stringsPtr("127.0.0.1", "not-an-ip")}); !errors.Is(err, ErrInvalidSettings) {
+		t.Fatalf("trusted proxy error = %v, want ErrInvalidSettings", err)
+	}
 }
 
-func strPtr(value string) *string { return &value }
-func intPtr(value int) *int       { return &value }
-func boolPtr(value bool) *bool    { return &value }
+func TestUpdateCanonicalizesTrustedProxies(t *testing.T) {
+	service, _ := newServiceForTest(t)
+	snapshot, err := service.Update(context.Background(), Update{TrustedProxies: stringsPtr(
+		" 127.0.0.1 ", "10.10.3.9/16", "127.0.0.1", "2001:db8::/32",
+	)})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	want := []string{"127.0.0.1", "10.10.0.0/16", "2001:db8::/32"}
+	if !reflect.DeepEqual(snapshot.TrustedProxies, want) {
+		t.Fatalf("trusted proxies = %#v, want %#v", snapshot.TrustedProxies, want)
+	}
+}
+
+func strPtr(value string) *string           { return &value }
+func intPtr(value int) *int                 { return &value }
+func boolPtr(value bool) *bool              { return &value }
+func stringsPtr(values ...string) *[]string { return &values }

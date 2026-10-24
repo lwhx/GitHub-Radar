@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -50,6 +51,7 @@ type Config struct {
 	Scheduler     schedulerService
 	Readmes       readmeService
 	Settings      settingsService
+	Backups       backupService
 	PublicBaseURL string
 	CookieSecure  bool
 	StaticDir     string
@@ -105,6 +107,10 @@ func New(config Config) http.Handler {
 	router.Get("/api/v1/admin/settings", s.getAdminSettings)
 	router.Patch("/api/v1/admin/settings", s.updateAdminSettings)
 	router.Get("/api/v1/admin/audit-logs", s.listAuditLogs)
+	router.Get("/api/v1/admin/backups", s.listBackups)
+	router.Post("/api/v1/admin/backups", s.createBackup)
+	router.Post("/api/v1/admin/backups/{name}/verify", s.verifyBackup)
+	router.Get("/api/v1/admin/backups/{name}", s.downloadBackup)
 	router.Post("/api/v1/admin/jobs/run", s.runJob)
 	router.Patch("/api/v1/admin/jobs/{id}", s.updateJob)
 	router.Get("/api/v1/admin/job-runs", s.listJobRuns)
@@ -285,7 +291,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json")
 		return
 	}
-	ip := remoteIP(r.RemoteAddr)
+	ip := s.clientIP(r)
 	if s.logins.limited(ip) {
 		s.audit(r.Context(), nil, "admin.login", "login", "rate_limited")
 		writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED", "Too many login attempts")
@@ -465,6 +471,55 @@ func remoteIP(remoteAddr string) string {
 		return host
 	}
 	return remoteAddr
+}
+
+// clientIP only accepts X-Forwarded-For when the immediate TCP peer is in the
+// administrator-controlled trusted proxy list. Invalid chains fail closed.
+func (s *server) clientIP(r *http.Request) string {
+	peerText := remoteIP(r.RemoteAddr)
+	peer, err := netip.ParseAddr(peerText)
+	if err != nil || s.config.Settings == nil {
+		return peerText
+	}
+	snapshot, err := s.config.Settings.Get(r.Context())
+	if err != nil {
+		s.config.Logger.Warn("load trusted proxies", "request_id", requestID(r.Context()), "error", err)
+		return peerText
+	}
+	trusted := func(address netip.Addr) bool {
+		address = address.Unmap()
+		for _, raw := range snapshot.TrustedProxies {
+			if prefix, parseErr := netip.ParsePrefix(raw); parseErr == nil && prefix.Contains(address) {
+				return true
+			}
+			if exact, parseErr := netip.ParseAddr(raw); parseErr == nil && exact.Unmap() == address {
+				return true
+			}
+		}
+		return false
+	}
+	if !trusted(peer) {
+		return peerText
+	}
+	chain := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	if len(chain) == 1 && strings.TrimSpace(chain[0]) == "" {
+		return peerText
+	}
+	for index := len(chain) - 1; index >= 0; index-- {
+		address, parseErr := netip.ParseAddr(strings.TrimSpace(chain[index]))
+		if parseErr != nil {
+			return peerText
+		}
+		address = address.Unmap()
+		if !trusted(address) {
+			return address.String()
+		}
+	}
+	leftmost, parseErr := netip.ParseAddr(strings.TrimSpace(chain[0]))
+	if parseErr != nil {
+		return peerText
+	}
+	return leftmost.Unmap().String()
 }
 
 func constantTimeTokenEqual(first, second string) bool {

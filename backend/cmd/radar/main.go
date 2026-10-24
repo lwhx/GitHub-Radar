@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/github-radar/github-radar/internal/api"
 	"github.com/github-radar/github-radar/internal/auth"
+	"github.com/github-radar/github-radar/internal/backups"
 	"github.com/github-radar/github-radar/internal/config"
 	"github.com/github-radar/github-radar/internal/credentials"
 	"github.com/github-radar/github-radar/internal/db"
@@ -34,9 +36,10 @@ type commandDeps struct {
 	serve       func(context.Context, io.Writer) error
 	healthcheck func(context.Context) error
 	adminCreate func(context.Context, io.Reader, io.Writer, passwordReader) error
+	backup      func(context.Context, io.Writer) error
 }
 
-const usage = "usage: radar serve | radar healthcheck | radar admin create"
+const usage = "usage: radar serve | radar healthcheck | radar admin create | radar backup"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, term.ReadPassword); err != nil {
@@ -47,7 +50,7 @@ func main() {
 
 func run(ctx context.Context, args []string, input io.Reader, output io.Writer, readPassword passwordReader) error {
 	return runWithDeps(ctx, args, input, output, readPassword, commandDeps{
-		serve: runServe, healthcheck: runHealthcheck, adminCreate: runAdminCreate,
+		serve: runServe, healthcheck: runHealthcheck, adminCreate: runAdminCreate, backup: runBackup,
 	})
 }
 
@@ -68,6 +71,11 @@ func runWithDeps(ctx context.Context, args []string, input io.Reader, output io.
 			return errors.New("admin create command is unavailable")
 		}
 		return deps.adminCreate(ctx, input, output, readPassword)
+	case len(args) == 1 && args[0] == "backup":
+		if deps.backup == nil {
+			return errors.New("backup command is unavailable")
+		}
+		return deps.backup(ctx, output)
 	default:
 		return errors.New(usage)
 	}
@@ -107,6 +115,10 @@ func runServe(ctx context.Context, output io.Writer) error {
 		return fmt.Errorf("initialize settings cipher: %w", err)
 	}
 	siteSettings := settings.NewService(store.SQL(), settingsCipher, time.Now)
+	backupService, err := backups.NewService(store.SQL(), backupDirectory(cfg.DatabasePath), time.Now)
+	if err != nil {
+		return fmt.Errorf("initialize backup service: %w", err)
+	}
 	if err := jobScheduler.EnsureJob(ctx); err != nil {
 		return err
 	}
@@ -117,10 +129,11 @@ func runServe(ctx context.Context, output io.Writer) error {
 	collectorCtx, stopCollector := context.WithCancel(context.Background())
 	defer stopCollector()
 	go runCollectionLoop(collectorCtx, store.SQL(), jobScheduler, recoveryScheduler, logger)
+	go runBackupLoop(collectorCtx, backupService, logger)
 
 	server := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, Readmes: readmeService, Settings: siteSettings, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
+		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, Readmes: readmeService, Settings: siteSettings, Backups: backupService, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
 	}
@@ -188,6 +201,26 @@ func runCollectionLoop(ctx context.Context, database *sql.DB, collectionSchedule
 	}
 }
 
+// runBackupLoop ensures the daily and weekly backup windows are continuously met.
+func runBackupLoop(ctx context.Context, service *backups.Service, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		created, err := service.EnsureScheduled(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("scheduled backup failed", "error", err)
+		}
+		for _, item := range created {
+			logger.Info("scheduled backup created", "name", item.Name, "kind", item.Kind, "size_bytes", item.SizeBytes)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func collectionDue(ctx context.Context, database *sql.DB, jobType string) (bool, error) {
 	var due int
 	err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM collector_jobs
@@ -232,6 +265,32 @@ func checkReady(ctx context.Context, client *http.Client, baseURL string) error 
 		return errors.New("readiness returned an invalid response")
 	}
 	return nil
+}
+
+func runBackup(ctx context.Context, output io.Writer) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	store, err := db.Open(ctx, cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	service, err := backups.NewService(store.SQL(), backupDirectory(cfg.DatabasePath), time.Now)
+	if err != nil {
+		return fmt.Errorf("initialize backup service: %w", err)
+	}
+	item, err := service.Create(ctx, backups.KindManual)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "%s\t%d bytes\tsha256:%s\n", item.Name, item.SizeBytes, item.SHA256)
+	return nil
+}
+
+func backupDirectory(databasePath string) string {
+	return filepath.Join(filepath.Dir(databasePath), "backups")
 }
 
 func runAdminCreate(ctx context.Context, input io.Reader, output io.Writer, readPassword passwordReader) error {

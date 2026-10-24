@@ -77,11 +77,12 @@ func TestAdminSettingsUpdateValidatesAndAudits(t *testing.T) {
 	cookies := adminCookiesForLifecycle(t, handler, store)
 
 	recorder := adminRequest(t, handler, http.MethodPatch, "http://radar.test/api/v1/admin/settings",
-		`{"timezone":"Asia/Shanghai","default_page_size":50}`, cookies, true)
+		`{"timezone":"Asia/Shanghai","default_page_size":50,"trusted_proxies":["127.0.0.1"]}`, cookies, true)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("patch status = %d; body=%s", recorder.Code, recorder.Body.String())
 	}
-	if fake.calls != 1 || fake.update.Timezone == nil || *fake.update.Timezone != timezone {
+	if fake.calls != 1 || fake.update.Timezone == nil || *fake.update.Timezone != timezone ||
+		fake.update.TrustedProxies == nil || len(*fake.update.TrustedProxies) != 1 {
 		t.Fatalf("update = %+v calls=%d", fake.update, fake.calls)
 	}
 	var count int

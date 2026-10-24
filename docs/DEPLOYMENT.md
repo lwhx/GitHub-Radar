@@ -68,7 +68,7 @@ server {
 }
 ```
 
-注意：P1.1 的登录限速按 TCP 对端地址统计，反向代理后看到的可能都是 Nginx 地址（见 `docs/DECISIONS.md` ADR-001）。应用当前不信任 `X-Forwarded-For`，恢复真实客户端粒度需先实现可信代理列表。
+注意：登录限速默认只使用 TCP 对端地址，完全忽略代理头。部署反向代理后，在管理后台“系统运维 → 可信代理”填入应用实际看到的代理 IP/CIDR（单机 Nginx 通常为 `127.0.0.1`）；只有对端命中此列表时应用才从右向左解析 `X-Forwarded-For`，非法链会安全回退到对端地址。不要填写不受控制的公网网段。
 
 ## 4. 数据与备份
 
@@ -79,8 +79,11 @@ ls -la /opt/github-radar/data
 ```
 
 - 删除容器不删除数据：`docker compose down && docker compose up -d` 即可恢复。
-- **P1.1 还没有应用内备份命令**。手工备份请在容器停止或写入低谷期复制整个 `data/` 目录（含 `radar.db`、`-wal`、`-shm`），不要只复制单个 `.db` 文件。P1.4 将提供在线备份（`radar backup`）与保留策略。
-- `APP_ENCRYPTION_KEY` 必须随数据一起妥善保管，丢失后无法解密已保存的 Token 密文。
+- 应用启动后自动补齐日备/周备，备份目录为 `./data/backups/`；保留最近 **7 个日备 + 4 个周备**，手动备份不自动删除。
+- 手动创建在线一致性备份：`docker compose exec app /app/radar backup`。命令输出文件名、字节数与 SHA-256；也可在管理后台创建、校验和下载。
+- 每个备份由 SQLite `VACUUM INTO` 生成并立即通过 `PRAGMA quick_check`；无需停服，也不要把实时数据库的单个 `.db` 文件直接当备份。
+- 恢复前先在后台点击“校验”或对下载文件运行 `sqlite3 backup.db 'PRAGMA quick_check'`，结果必须为 `ok`。恢复时停止容器，将现有 `radar.db`、`radar.db-wal`、`radar.db-shm` 移出数据目录，再把已校验备份复制为 `data/radar.db`，最后启动并检查 `/readyz`。不要在运行中的服务上覆盖数据库文件。
+- `APP_ENCRYPTION_KEY` 必须随数据一起妥善保管，丢失后无法解密已保存的 Token 与 AI Key 密文。
 
 ## 5. 升级与回滚
 

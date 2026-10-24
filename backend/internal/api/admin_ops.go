@@ -35,14 +35,15 @@ func (s *server) getAdminSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateSettingsPayload struct {
-	SiteName        *string `json:"site_name"`
-	SiteDescription *string `json:"site_description"`
-	Timezone        *string `json:"timezone"`
-	DefaultPageSize *int    `json:"default_page_size"`
-	AIEnabled       *bool   `json:"ai_enabled"`
-	AIBaseURL       *string `json:"ai_base_url"`
-	AIModel         *string `json:"ai_model"`
-	AIAPIKey        *string `json:"ai_api_key"`
+	SiteName        *string   `json:"site_name"`
+	SiteDescription *string   `json:"site_description"`
+	Timezone        *string   `json:"timezone"`
+	DefaultPageSize *int      `json:"default_page_size"`
+	AIEnabled       *bool     `json:"ai_enabled"`
+	AIBaseURL       *string   `json:"ai_base_url"`
+	AIModel         *string   `json:"ai_model"`
+	AIAPIKey        *string   `json:"ai_api_key"`
+	TrustedProxies  *[]string `json:"trusted_proxies"`
 }
 
 func (s *server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +69,7 @@ func (s *server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.SiteName == nil && payload.SiteDescription == nil && payload.Timezone == nil &&
 		payload.DefaultPageSize == nil && payload.AIEnabled == nil && payload.AIBaseURL == nil &&
-		payload.AIModel == nil && payload.AIAPIKey == nil {
+		payload.AIModel == nil && payload.AIAPIKey == nil && payload.TrustedProxies == nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "at least one field is required")
 		return
 	}
@@ -81,6 +82,7 @@ func (s *server) updateAdminSettings(w http.ResponseWriter, r *http.Request) {
 		AIBaseURL:       payload.AIBaseURL,
 		AIModel:         payload.AIModel,
 		AIAPIKey:        payload.AIAPIKey,
+		TrustedProxies:  payload.TrustedProxies,
 	})
 	if err != nil {
 		s.audit(r.Context(), &admin.ID, "admin.settings.update", "site", "failure")
