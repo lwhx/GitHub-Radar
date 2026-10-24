@@ -118,13 +118,28 @@ func newRecoveryService(database *sql.DB, source func(context.Context) (Searcher
 
 // EnsureJob seeds the single collection job row; it is idempotent.
 func (service *Service) EnsureJob(ctx context.Context) error {
-	now := formatTime(service.now())
+	nowValue := service.now().UTC()
+	now := formatTime(nowValue)
 	_, err := service.db.ExecContext(ctx, `INSERT INTO collector_jobs
 		(job_type, enabled, interval_seconds, next_run_at, priority, config_json)
 		VALUES (?, 1, ?, ?, 0, '{}')
 		ON CONFLICT(job_type) DO NOTHING`, service.jobType, int(service.interval.Seconds()), now)
 	if err != nil {
 		return fmt.Errorf("seed collection job: %w", err)
+	}
+	cutoff := formatTime(nowValue.Add(-leaseDuration))
+	if _, err := service.db.ExecContext(ctx, `UPDATE job_runs
+		SET finished_at = ?, status = 'failed', failed_count = CASE WHEN failed_count = 0 THEN 1 ELSE failed_count END,
+			last_error_code = 'process_interrupted', error_summary = 'collection process interrupted before completion'
+		WHERE status = 'running'
+			AND COALESCE(heartbeat_at, started_at) < ?
+			AND job_id = (SELECT id FROM collector_jobs WHERE job_type = ?)`, now, cutoff, service.jobType); err != nil {
+		return fmt.Errorf("recover stale collection runs: %w", err)
+	}
+	if _, err := service.db.ExecContext(ctx, `UPDATE collector_jobs
+		SET lease_owner = NULL, lease_expires_at = NULL
+		WHERE job_type = ? AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`, service.jobType, now); err != nil {
+		return fmt.Errorf("release expired collection lease: %w", err)
 	}
 	return nil
 }

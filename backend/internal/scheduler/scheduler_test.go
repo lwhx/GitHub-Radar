@@ -2,8 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,6 +158,63 @@ func TestRunOnceClaimsLeaseRecoversAndCompletes(t *testing.T) {
 	}
 	if nextRunAt == nil || *nextRunAt != "2026-10-23T12:30:00Z" {
 		t.Errorf("next_run_at = %v", nextRunAt)
+	}
+}
+
+func TestEnsureJobMarksStaleRunningRunsFailed(t *testing.T) {
+	t.Parallel()
+
+	service, store := newTestService(t, fixedSearcher{})
+	ctx := context.Background()
+	if err := service.EnsureJob(ctx); err != nil {
+		t.Fatalf("initial EnsureJob() error = %v", err)
+	}
+	var jobID int64
+	if err := store.SQL().QueryRow(`SELECT id FROM collector_jobs WHERE job_type = 'github_collection'`).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []struct {
+		startedAt   string
+		heartbeatAt string
+	}{
+		{startedAt: "2026-10-23T10:00:00Z", heartbeatAt: "2026-10-23T10:05:00Z"},
+		{startedAt: "2026-10-23T11:55:00Z", heartbeatAt: "2026-10-23T11:59:00Z"},
+	} {
+		if _, err := store.SQL().Exec(`INSERT INTO job_runs
+			(job_id, started_at, status, trigger, heartbeat_at) VALUES (?, ?, 'running', 'schedule', ?)`,
+			jobID, run.startedAt, run.heartbeatAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.EnsureJob(ctx); err != nil {
+		t.Fatalf("recovery EnsureJob() error = %v", err)
+	}
+	rows, err := store.SQL().Query(`SELECT status, finished_at, last_error_code, error_summary FROM job_runs ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []struct {
+		status, finishedAt, errorCode, summary sql.NullString
+	}
+	for rows.Next() {
+		var item struct {
+			status, finishedAt, errorCode, summary sql.NullString
+		}
+		if err := rows.Scan(&item.status, &item.finishedAt, &item.errorCode, &item.summary); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, item)
+	}
+	if len(got) != 2 {
+		t.Fatalf("run count = %d, want 2", len(got))
+	}
+	if got[0].status.String != "failed" || got[0].finishedAt.String != "2026-10-23T12:00:00Z" ||
+		got[0].errorCode.String != "process_interrupted" || !strings.Contains(got[0].summary.String, "interrupted") {
+		t.Fatalf("stale run = %+v", got[0])
+	}
+	if got[1].status.String != "running" || got[1].finishedAt.Valid || got[1].errorCode.Valid || got[1].summary.Valid {
+		t.Fatalf("fresh run changed = %+v", got[1])
 	}
 }
 
