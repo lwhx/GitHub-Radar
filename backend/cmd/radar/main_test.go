@@ -92,6 +92,21 @@ func TestAdminCreateRejectsPasswordMismatchAndDuplicate(t *testing.T) {
 	}
 }
 
+func TestAdminCreateExplainsPasswordRule(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("DATABASE_PATH", t.TempDir()+"/radar.db")
+	values := [][]byte{[]byte("short"), []byte("short")}
+	i := 0
+	err := run(context.Background(), []string{"admin", "create"}, strings.NewReader("radar\n"), io.Discard, func(int) ([]byte, error) {
+		value := values[i]
+		i++
+		return value, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "password must be 12 to 1024 characters") {
+		t.Fatalf("run() error = %v, want password rule explanation", err)
+	}
+}
+
 func TestRunDispatchesCommands(t *testing.T) {
 	for _, test := range []struct {
 		name string

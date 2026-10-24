@@ -331,8 +331,13 @@ func runAdminCreate(ctx context.Context, input io.Reader, output io.Writer, read
 	}
 	admin, err := auth.NewService(store.SQL()).CreateAdmin(ctx, strings.TrimSpace(username), string(password))
 	if err != nil {
-		if errors.Is(err, auth.ErrAdminExists) {
+		switch {
+		case errors.Is(err, auth.ErrAdminExists):
 			return fmt.Errorf("administrator already exists")
+		case errors.Is(err, auth.ErrInvalidPassword):
+			return fmt.Errorf("password must be 12 to 1024 characters")
+		case errors.Is(err, auth.ErrInvalidUsername):
+			return fmt.Errorf("username must be 3 to 64 ASCII letters, digits, dots, underscores or hyphens")
 		}
 		return err
 	}
