@@ -52,6 +52,7 @@ type Config struct {
 	Readmes       readmeService
 	Settings      settingsService
 	Backups       backupService
+	Repositories  repositoryAdminService
 	PublicBaseURL string
 	CookieSecure  bool
 	StaticDir     string
@@ -103,6 +104,9 @@ func New(config Config) http.Handler {
 	router.Post("/api/v1/admin/categories", s.createAdminCategory)
 	router.Patch("/api/v1/admin/categories/{id}", s.updateAdminCategory)
 	router.Delete("/api/v1/admin/categories/{id}", s.deleteAdminCategory)
+	router.Get("/api/v1/admin/repos", s.listAdminRepositories)
+	router.Post("/api/v1/admin/repos/import", s.importAdminRepository)
+	router.Patch("/api/v1/admin/repos/{id}", s.updateAdminRepository)
 	router.Get("/api/v1/admin/jobs", s.listJobs)
 	router.Get("/api/v1/admin/settings", s.getAdminSettings)
 	router.Patch("/api/v1/admin/settings", s.updateAdminSettings)

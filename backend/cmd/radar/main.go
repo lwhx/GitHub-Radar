@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/github-radar/github-radar/internal/adminrepos"
 	"github.com/github-radar/github-radar/internal/api"
 	"github.com/github-radar/github-radar/internal/auth"
 	"github.com/github-radar/github-radar/internal/backups"
@@ -108,6 +109,9 @@ func runServe(ctx context.Context, output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("initialize GitHub repository detail client: %w", err)
 	}
+	repositoryAdminService := adminrepos.New(store.SQL(), func(ctx context.Context) (adminrepos.RepositoryGetter, error) {
+		return repositorySource(ctx)
+	})
 	jobScheduler := scheduler.New(store.SQL(), searcherSource, repositorySource)
 	readmeService := readmes.NewService(store.SQL(), readmes.NewGitHubProvider(credentialService, cfg.GitHubAPIBaseURL), time.Now, logger)
 	settingsCipher, err := credentials.NewCipher(cfg.EncryptionKey, nil)
@@ -133,7 +137,7 @@ func runServe(ctx context.Context, output io.Writer) error {
 
 	server := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, Readmes: readmeService, Settings: siteSettings, Backups: backupService, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
+		Handler:           api.New(api.Config{DB: store, Auth: auth.NewService(store.SQL()), Credentials: credentialService, Scheduler: jobScheduler, Readmes: readmeService, Settings: siteSettings, Backups: backupService, Repositories: repositoryAdminService, PublicBaseURL: cfg.PublicBaseURL, CookieSecure: cfg.CookieSecure, StaticDir: cfg.StaticDir, AppEnv: cfg.AppEnv, Logger: logger}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
 	}

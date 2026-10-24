@@ -8,6 +8,7 @@ import AdminJobsPage from '../pages/AdminJobsPage.vue'
 import AdminLoginPage from '../pages/AdminLoginPage.vue'
 import AdminOverviewPage from '../pages/AdminOverviewPage.vue'
 import AdminOperationsPage from '../pages/AdminOperationsPage.vue'
+import AdminRepositoriesPage from '../pages/AdminRepositoriesPage.vue'
 import CategoriesPage from '../pages/CategoriesPage.vue'
 import FavoritesPage from '../pages/FavoritesPage.vue'
 import HomePage from '../pages/HomePage.vue'
@@ -47,6 +48,7 @@ const router = createRouter({
         { path: '', name: 'admin-overview', component: AdminOverviewPage },
         { path: 'credentials', name: 'admin-credentials', component: AdminCredentialsPage },
         { path: 'categories', name: 'admin-categories', component: AdminCategoriesPage },
+        { path: 'repositories', name: 'admin-repositories', component: AdminRepositoriesPage },
         { path: 'jobs', name: 'admin-jobs', component: AdminJobsPage },
         { path: 'operations', name: 'admin-operations', component: AdminOperationsPage },
       ],

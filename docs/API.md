@@ -394,6 +394,33 @@ curl -i -X POST http://127.0.0.1:8080/api/v1/admin/auth/login \
 
 永久删除分类，`repo_categories` 与 `category_rules` 随外键级联删除（仓库本身不受影响，只是不再归属该分类）。不存在 `404 NOT_FOUND`；需要二次确认后调用；审计 `admin.category.delete`。
 
+### `GET /api/v1/admin/repos?q=&page=1&page_size=20`
+
+返回管理仓库列表，**包含已隐藏仓库**，可按仓库全名或描述搜索；`page_size` 范围 1–100。响应项包含 GitHub ID、Stars、同步状态、可见性和分类 ID。该接口只需管理员会话，响应禁用缓存。
+
+### `POST /api/v1/admin/repos/import`
+
+从 GitHub 实时手工导入公开仓库，需要合法 Origin、管理员会话和 CSRF：
+
+```json
+{ "url": "https://github.com/owner/repo" }
+```
+
+- 只接受标准 `https://github.com/{owner}/{repo}` URL；拒绝 HTTP、其他主机、用户信息、查询参数、锚点和仓库子路径；
+- 服务端通过可用的加密 GitHub 凭据调用真实仓库详情 API，不根据 URL 制造统计；私有仓库返回 `422 REPOSITORY_NOT_PUBLIC`；
+- 首次导入返回 `201` 并写入真实当前 Star 快照；重复导入返回 `200`，刷新 GitHub 元数据但保留管理员维护的隐藏状态和分类；
+- 无可用凭据返回 `503 NO_GITHUB_CREDENTIAL`，配额耗尽返回 `429 GITHUB_RATE_LIMITED`；审计 `admin.repository.import`。
+
+### `PATCH /api/v1/admin/repos/{id}`
+
+局部维护仓库，需要合法 Origin、管理员会话和 CSRF：
+
+```json
+{ "hidden": false, "category_ids": [2, 7], "resync": true }
+```
+
+至少提供一项；`hidden` 控制公开端可见性，`category_ids` 整体替换分类（第一项为主分类，来源标记为 `manual`），`resync` 将详情同步状态重排为 `pending`。隐藏仓库不会被详情同步器消费，因此对隐藏仓库单独请求 `resync` 返回 `400 INVALID_REQUEST`；可在同一次请求中设置 `hidden: false` 并 `resync: true`。不存在的分类会使整个事务回滚。公开接口对隐藏仓库统一返回 `404`。审计 `admin.repository.update`。
+
 ### `GET /api/v1/admin/jobs`
 
 返回采集任务的周期、下次运行时间与当前租约。默认包含：

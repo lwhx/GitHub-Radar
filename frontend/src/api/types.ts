@@ -206,3 +206,31 @@ export interface AuditLog {
 export interface AuditLogsResponse {
   items: AuditLog[]
 }
+
+export type RepositorySyncStatus = 'pending' | 'syncing' | 'synced' | 'retrying' | 'failed' | 'inaccessible'
+
+export interface AdminRepository {
+  id: number
+  github_id: number
+  full_name: string
+  html_url: string
+  description: string | null
+  language: string | null
+  stars_count: number
+  hidden: boolean
+  sync_status: RepositorySyncStatus
+  last_synced_at: string | null
+  category_ids: number[]
+}
+
+export interface AdminRepositoriesResponse {
+  items: AdminRepository[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface AdminRepositoryImportResponse {
+  repository: AdminRepository
+  created: boolean
+}
