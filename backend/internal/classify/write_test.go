@@ -246,6 +246,24 @@ func TestClassifyManyManualAssignmentOverridesAndRemovesAutoAssignments(t *testi
 	}
 }
 
+func TestClassifyManyChunksRepositoryIDsBelowSQLiteVariableLimit(t *testing.T) {
+	t.Parallel()
+
+	store := openTestDB(t)
+	database := store.SQL()
+	engine, err := classify.LoadEngine(context.Background(), database)
+	if err != nil {
+		t.Fatalf("LoadEngine() error = %v", err)
+	}
+	repoIDs := make([]int64, 40_000)
+	for index := range repoIDs {
+		repoIDs[index] = int64(index + 1)
+	}
+	if err := classify.ClassifyMany(context.Background(), database, engine, repoIDs); err != nil {
+		t.Fatalf("ClassifyMany() with 40,000 IDs error = %v", err)
+	}
+}
+
 func TestClassifyOneIsIdempotentAndKeepsManualAssignments(t *testing.T) {
 	t.Parallel()
 

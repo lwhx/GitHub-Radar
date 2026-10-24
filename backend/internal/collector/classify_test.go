@@ -177,6 +177,53 @@ func TestProcessPendingClassifiesMultipleRepositoriesFromOnePage(t *testing.T) {
 	}
 }
 
+func TestProcessPendingRetriesSamePageAfterClassificationFailure(t *testing.T) {
+	t.Parallel()
+
+	searcher := newFakeSearcher()
+	from := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	item := repo(75, "delta/retry-mcp", 2)
+	item.Topics = []string{"mcp"}
+	searcher.windows[windowKey(from, to)] = []page{{
+		result: github.SearchResult{TotalCount: 1, Items: []github.Repository{item}},
+	}}
+	worker, database := newTestCollector(t, searcher)
+	ctx := context.Background()
+	windowID, err := worker.EnsureWindow(ctx, from, to, 0)
+	if err != nil {
+		t.Fatalf("EnsureWindow() error = %v", err)
+	}
+	if _, err := database.Exec(`ALTER TABLE category_rules RENAME TO category_rules_unavailable`); err != nil {
+		t.Fatalf("hide category_rules: %v", err)
+	}
+	if _, err := worker.ProcessPending(ctx, 0); err == nil {
+		t.Fatal("ProcessPending() succeeded while classification rules were unavailable")
+	}
+	var pageNumber int
+	var status string
+	if err := database.QueryRow(`SELECT page, coverage_status FROM collection_windows WHERE id = ?`, windowID).Scan(&pageNumber, &status); err != nil {
+		t.Fatalf("read window after classification failure: %v", err)
+	}
+	if pageNumber != 1 || status != statusPending {
+		t.Fatalf("window after classification failure = page %d status %q, want page 1 pending", pageNumber, status)
+	}
+	if _, err := database.Exec(`ALTER TABLE category_rules_unavailable RENAME TO category_rules`); err != nil {
+		t.Fatalf("restore category_rules: %v", err)
+	}
+	if _, err := worker.ProcessPending(ctx, 0); err != nil {
+		t.Fatalf("retry ProcessPending() error = %v", err)
+	}
+	var repoID int64
+	if err := database.QueryRow(`SELECT id FROM repositories WHERE github_id = 75`).Scan(&repoID); err != nil {
+		t.Fatalf("load retried repository: %v", err)
+	}
+	assertAssignments(t, database, repoID, map[string]int{"mcp": 1})
+	if searcher.calls != 2 {
+		t.Fatalf("search calls = %d, want 2 so the failed page was fetched again", searcher.calls)
+	}
+}
+
 func assertAssignments(t *testing.T, database *sql.DB, repoID int64, want map[string]int) {
 	t.Helper()
 	rows, err := database.Query(`SELECT c.slug, rc.is_primary FROM repo_categories rc

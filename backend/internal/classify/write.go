@@ -13,6 +13,9 @@ import (
 // defaultBatchSize 是 Backfill 的默认每批仓库数。
 const defaultBatchSize = 500
 
+// maxRepoIDsPerBatch 控制动态 IN 子句参数数量，低于 SQLite 常见变量上限。
+const maxRepoIDsPerBatch = 500
+
 // busyRetryWindow 是遇到 SQLITE_BUSY 时的重试时间窗。
 const busyRetryWindow = 15 * time.Second
 
@@ -67,20 +70,29 @@ func ClassifyOne(ctx context.Context, database *sql.DB, engine *Engine, repoID i
 	return ClassifyMany(ctx, database, engine, []int64{repoID})
 }
 
-// ClassifyMany 批量加载并归类仓库。重复 ID 只处理一次；所有写入共用一个事务。
+// ClassifyMany 批量加载并归类仓库。重复 ID 只处理一次；每个分块共用一个事务。
 func ClassifyMany(ctx context.Context, database *sql.DB, engine *Engine, repoIDs []int64) error {
 	if engine == nil {
 		return errors.New("classify engine is nil")
 	}
-	records, err := loadRepos(ctx, database, repoIDs)
-	if err != nil {
-		return err
+	unique := uniquePositiveIDs(repoIDs)
+	for start := 0; start < len(unique); start += maxRepoIDsPerBatch {
+		end := start + maxRepoIDsPerBatch
+		if end > len(unique) {
+			end = len(unique)
+		}
+		records, err := loadRepos(ctx, database, unique[start:end])
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			continue
+		}
+		if _, _, err := storeRepoBatch(ctx, database, engine, records); err != nil {
+			return err
+		}
 	}
-	if len(records) == 0 {
-		return nil
-	}
-	_, _, err = storeRepoBatch(ctx, database, engine, records)
-	return err
+	return nil
 }
 
 // CategoryCount 是单个分类的归类仓库数。
@@ -140,6 +152,37 @@ func loadRepoBatch(ctx context.Context, database *sql.DB, afterID int64, limit i
 }
 
 func loadRepos(ctx context.Context, database *sql.DB, repoIDs []int64) ([]repoRecord, error) {
+	if len(repoIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(repoIDs)), ",")
+	arguments := make([]any, len(repoIDs))
+	for index, repoID := range repoIDs {
+		arguments[index] = repoID
+	}
+	rows, err := database.QueryContext(ctx, `
+		SELECT id, name, full_name, COALESCE(description, ''), COALESCE(language, ''), topics_json
+		FROM repositories WHERE id IN (`+placeholders+`) ORDER BY id`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("load repositories for classification: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]repoRecord, 0, len(repoIDs))
+	for rows.Next() {
+		record, err := scanRepoRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repositories for classification: %w", err)
+	}
+	return records, nil
+}
+
+func uniquePositiveIDs(repoIDs []int64) []int64 {
 	unique := make([]int64, 0, len(repoIDs))
 	seen := make(map[int64]struct{}, len(repoIDs))
 	for _, repoID := range repoIDs {
@@ -152,35 +195,7 @@ func loadRepos(ctx context.Context, database *sql.DB, repoIDs []int64) ([]repoRe
 		seen[repoID] = struct{}{}
 		unique = append(unique, repoID)
 	}
-	if len(unique) == 0 {
-		return nil, nil
-	}
-
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
-	arguments := make([]any, len(unique))
-	for index, repoID := range unique {
-		arguments[index] = repoID
-	}
-	rows, err := database.QueryContext(ctx, `
-		SELECT id, name, full_name, COALESCE(description, ''), COALESCE(language, ''), topics_json
-		FROM repositories WHERE id IN (`+placeholders+`) ORDER BY id`, arguments...)
-	if err != nil {
-		return nil, fmt.Errorf("load repositories for classification: %w", err)
-	}
-	defer rows.Close()
-
-	records := make([]repoRecord, 0, len(unique))
-	for rows.Next() {
-		record, err := scanRepoRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate repositories for classification: %w", err)
-	}
-	return records, nil
+	return unique
 }
 
 type rowScanner interface {

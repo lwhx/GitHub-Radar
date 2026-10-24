@@ -133,29 +133,32 @@ func (collector *Collector) storePage(ctx context.Context, windowID int64, item 
 			summary.Snapshots++
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return summary, fmt.Errorf("commit page storage: %w", err)
+	}
+	// 已存在仓库的描述、topics、language 也可能随搜索结果更新，仍需重算以移除过期自动归类。
+	if err := collector.classifyStored(ctx, storedIDs); err != nil {
+		return summary, err
+	}
+	// 仅在仓库入库和归类都成功后推进游标；任一步失败时下次会重试同一页。
 	var nullableNext any
 	if nextURL != "" {
 		nullableNext = nextURL
 	}
 	if firstPage {
-		if _, err := tx.ExecContext(ctx, `UPDATE collection_windows
+		if _, err := collector.db.ExecContext(ctx, `UPDATE collection_windows
 			SET page = ?, next_url = ?, total_count = ?, incomplete_results = ?, attempt_count = 0, updated_at = ?
 			WHERE id = ?`,
 			page+1, nullableNext, result.TotalCount, boolToInt(result.IncompleteResults), now, windowID); err != nil {
 			return summary, fmt.Errorf("update collection window %d: %w", windowID, err)
 		}
 	} else {
-		if _, err := tx.ExecContext(ctx, `UPDATE collection_windows
+		if _, err := collector.db.ExecContext(ctx, `UPDATE collection_windows
 			SET page = ?, next_url = ?, attempt_count = 0, updated_at = ?
 			WHERE id = ?`, page+1, nullableNext, now, windowID); err != nil {
 			return summary, fmt.Errorf("update collection window %d: %w", windowID, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return summary, fmt.Errorf("commit page storage: %w", err)
-	}
-	// 已存在仓库的描述、topics、language 也可能随搜索结果更新，仍需重算以移除过期自动归类。
-	collector.classifyStored(ctx, storedIDs)
 	return summary, nil
 }
 

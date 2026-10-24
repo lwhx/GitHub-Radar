@@ -101,19 +101,22 @@ func (collector *Collector) log() *slog.Logger {
 	return slog.Default()
 }
 
-// classifyStored 每批重新加载规则并一次性归类全部仓库；失败仅记日志，不中断采集。
-func (collector *Collector) classifyStored(ctx context.Context, repoIDs []int64) {
+// classifyStored 每批重新加载规则并一次性归类全部仓库。
+// 错误必须返回给页面状态机，确保游标不推进、下次可重试同一批仓库。
+func (collector *Collector) classifyStored(ctx context.Context, repoIDs []int64) error {
 	if len(repoIDs) == 0 {
-		return
+		return nil
 	}
 	engine, err := classify.LoadEngine(ctx, collector.db)
 	if err != nil {
 		collector.log().Error("load classify rules", "error", err)
-		return
+		return fmt.Errorf("load classify rules: %w", err)
 	}
 	if err := classify.ClassifyMany(ctx, collector.db, engine, repoIDs); err != nil {
 		collector.log().Warn("classify repositories", "repo_count", len(repoIDs), "error", err)
+		return fmt.Errorf("classify repositories: %w", err)
 	}
+	return nil
 }
 
 // ProcessPending drains every pending window belonging to runID (0 means unassigned) in time order.
