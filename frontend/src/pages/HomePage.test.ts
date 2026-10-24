@@ -55,6 +55,7 @@ describe('HomePage', () => {
 
     expect(wrapper.text()).not.toContain('数据库为空')
     expect(wrapper.text()).toContain('12')
+    expect(wrapper.text()).not.toContain('P1.1')
   })
 
   it('shows an error state with retry when the stats request fails', async () => {

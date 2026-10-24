@@ -35,8 +35,7 @@ onMounted(load)
     <section class="rounded-lg border border-line bg-card p-6">
       <h1 class="text-xl font-semibold">发现值得关注的 GitHub 开源项目</h1>
       <p class="mt-2 text-sm text-muted">
-        跟踪新建项目的 Star 增长，按 AI、Docker、自托管等领域分类发现潜力项目。当前站点处于 P1.1
-        基础阶段，数据采集引擎将在 P1.2 接入。
+        跟踪新建项目的 Star 增长，按 AI、Docker、自托管等领域分类发现潜力项目。
       </p>
     </section>
 
@@ -75,13 +74,13 @@ onMounted(load)
       >
         <h2 class="font-medium text-warning">数据库为空</h2>
         <p class="mt-2 text-sm text-muted">
-          本站只展示真实采集的数据，不使用演示项目或假统计占位。P1.2 将接入 GitHub
-          采集引擎，首次启动后自动回填过去 7 天的公开仓库。数据采集完成前，榜单与搜索保持空态。
+          本站只展示真实采集的数据，不使用演示项目或假统计占位。采集引擎首次启动后会自动回填过去
+          7 天的公开仓库。数据采集完成前，榜单与搜索保持空态。
         </p>
         <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-muted">
           <li>管理员可在部署后通过 <code class="rounded bg-bg px-1">radar admin create</code> 创建账户并登录后台；</li>
-          <li>在后台添加 GitHub 凭据并启动采集任务（P1.2 提供对应界面）；</li>
-          <li>采集完成后，首页、排行榜与项目详情将陆续可用（P1.3）。</li>
+          <li>在后台「凭据管理」添加 GitHub 凭据，采集任务将按计划自动运行；</li>
+          <li>采集完成后，首页、排行榜与项目详情将陆续可用。</li>
         </ul>
       </section>
     </template>
