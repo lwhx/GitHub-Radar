@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
+	"github.com/github-radar/github-radar/internal/classify"
 	"github.com/github-radar/github-radar/internal/github"
 )
 
@@ -44,6 +47,10 @@ type Collector struct {
 	maxPages   int
 	source     string
 	queryHash  string
+
+	logger         *slog.Logger
+	classifyOnce   sync.Once
+	classifyEngine *classify.Engine
 }
 
 type Summary struct {
@@ -86,6 +93,46 @@ func newCollector(database *sql.DB, search Searcher, now func() time.Time, maxRe
 	return &Collector{
 		db: database, search: search, now: now, maxResults: maxResults, maxDepth: maxDepth,
 		maxPages: maxSearchPages, source: windowSource, queryHash: windowQueryHash,
+	}
+}
+
+// log 返回采集器日志器；未注入时退回全局默认日志器。
+func (collector *Collector) log() *slog.Logger {
+	if collector.logger != nil {
+		return collector.logger
+	}
+	return slog.Default()
+}
+
+// classifyEngine 首次使用时从数据库加载启用规则，之后复用；加载失败仅记日志并停用归类。
+func (collector *Collector) classifyEngineOnce(ctx context.Context) *classify.Engine {
+	collector.classifyOnce.Do(func() {
+		engine, err := classify.LoadEngine(ctx, collector.db)
+		if err != nil {
+			collector.log().Error("load classify rules", "error", err)
+			return
+		}
+		collector.classifyEngine = engine
+	})
+	return collector.classifyEngine
+}
+
+// classifyStored 对已入库仓库逐一归类；失败仅记日志，不中断采集。
+func (collector *Collector) classifyStored(ctx context.Context, repoIDs []int64) {
+	if len(repoIDs) == 0 {
+		return
+	}
+	engine := collector.classifyEngineOnce(ctx)
+	if engine == nil {
+		return
+	}
+	for _, repoID := range repoIDs {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := classify.ClassifyOne(ctx, collector.db, engine, repoID); err != nil {
+			collector.log().Warn("classify repository", "repo_id", repoID, "error", err)
+		}
 	}
 }
 

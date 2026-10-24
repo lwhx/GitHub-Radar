@@ -103,6 +103,7 @@ type pageSummary struct {
 
 func (collector *Collector) storePage(ctx context.Context, windowID int64, item window, result github.SearchResult, nextURL string, firstPage bool, page int) (pageSummary, error) {
 	var summary pageSummary
+	storedIDs := make([]int64, 0, len(result.Items))
 	tx, err := collector.db.BeginTx(ctx, nil)
 	if err != nil {
 		return summary, fmt.Errorf("begin page storage: %w", err)
@@ -114,7 +115,7 @@ func (collector *Collector) storePage(ctx context.Context, windowID int64, item 
 			summary.Skipped++
 			continue
 		}
-		created, snapshot, err := upsertRepository(ctx, tx, repository, now)
+		repoID, created, snapshot, err := upsertRepository(ctx, tx, repository, now)
 		if err != nil {
 			if isFullNameConflict(err) {
 				summary.Skipped++
@@ -122,6 +123,7 @@ func (collector *Collector) storePage(ctx context.Context, windowID int64, item 
 			}
 			return summary, fmt.Errorf("store repository %s: %w", repository.FullName, err)
 		}
+		storedIDs = append(storedIDs, repoID)
 		if created {
 			summary.Created++
 		} else {
@@ -152,20 +154,22 @@ func (collector *Collector) storePage(ctx context.Context, windowID int64, item 
 	if err := tx.Commit(); err != nil {
 		return summary, fmt.Errorf("commit page storage: %w", err)
 	}
+	// 仓库已入库，归类失败仅记日志，不影响采集结果。
+	collector.classifyStored(ctx, storedIDs)
 	return summary, nil
 }
 
-func upsertRepository(ctx context.Context, tx *sql.Tx, repository github.Repository, now string) (bool, bool, error) {
+func upsertRepository(ctx context.Context, tx *sql.Tx, repository github.Repository, now string) (int64, bool, bool, error) {
 	if repository.FullName == "" || repository.ID == 0 {
-		return false, false, errors.New("GitHub search result is missing id or full name")
+		return 0, false, false, errors.New("GitHub search result is missing id or full name")
 	}
 	owner, name, found := strings.Cut(repository.FullName, "/")
 	if !found {
-		return false, false, errors.New("GitHub repository full name is malformed")
+		return 0, false, false, errors.New("GitHub repository full name is malformed")
 	}
 	topics, err := json.Marshal(repository.Topics)
 	if err != nil {
-		return false, false, fmt.Errorf("encode repository topics: %w", err)
+		return 0, false, false, fmt.Errorf("encode repository topics: %w", err)
 	}
 	var pushedAt any
 	if repository.PushedAt != nil && !repository.PushedAt.IsZero() {
@@ -177,7 +181,7 @@ func upsertRepository(ctx context.Context, tx *sql.Tx, repository github.Reposit
 	}
 	capturedAt, err := time.Parse(timestampLayout, now)
 	if err != nil {
-		return false, false, fmt.Errorf("parse repository capture time: %w", err)
+		return 0, false, false, fmt.Errorf("parse repository capture time: %w", err)
 	}
 
 	var existingID int64
@@ -197,20 +201,20 @@ func upsertRepository(ctx context.Context, tx *sql.Tx, repository github.Reposit
 			formatTime(repository.CreatedAt), formatTime(repository.UpdatedAt), pushedAt, now, now, now,
 			formatTime(capturedAt.Add(initialDetailDelay)))
 		if insertErr != nil {
-			return false, false, insertErr
+			return 0, false, false, insertErr
 		}
 		repoID, idErr := result.LastInsertId()
 		if idErr != nil {
-			return false, false, fmt.Errorf("read repository id: %w", idErr)
+			return 0, false, false, fmt.Errorf("read repository id: %w", idErr)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO star_snapshots
 			(repo_id, star_count, captured_at, source, sample_status) VALUES (?, ?, ?, 'search', 'ok')`,
 			repoID, repository.StargazersCount, now); err != nil {
-			return false, false, fmt.Errorf("record initial star snapshot: %w", err)
+			return 0, false, false, fmt.Errorf("record initial star snapshot: %w", err)
 		}
-		return true, true, nil
+		return repoID, true, true, nil
 	case err != nil:
-		return false, false, err
+		return 0, false, false, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE repositories
@@ -225,9 +229,9 @@ func upsertRepository(ctx context.Context, tx *sql.Tx, repository github.Reposit
 		nullString(&repository.DefaultBranch), string(topics), repository.ForksCount,
 		repository.OpenIssuesCount, boolToInt(repository.Fork), boolToInt(repository.Archived), boolToInt(repository.Disabled),
 		formatTime(repository.UpdatedAt), pushedAt, now, repository.StargazersCount, now, existingID); err != nil {
-		return false, false, err
+		return 0, false, false, err
 	}
-	return false, false, nil
+	return existingID, false, false, nil
 }
 
 func (collector *Collector) markCompleted(ctx context.Context, windowID int64) error {

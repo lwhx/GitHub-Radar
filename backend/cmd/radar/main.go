@@ -22,6 +22,7 @@ import (
 	"github.com/github-radar/github-radar/internal/api"
 	"github.com/github-radar/github-radar/internal/auth"
 	"github.com/github-radar/github-radar/internal/backups"
+	"github.com/github-radar/github-radar/internal/classify"
 	"github.com/github-radar/github-radar/internal/config"
 	"github.com/github-radar/github-radar/internal/credentials"
 	"github.com/github-radar/github-radar/internal/db"
@@ -34,13 +35,14 @@ import (
 type passwordReader func(fd int) ([]byte, error)
 
 type commandDeps struct {
-	serve       func(context.Context, io.Writer) error
-	healthcheck func(context.Context) error
-	adminCreate func(context.Context, io.Reader, io.Writer, passwordReader) error
-	backup      func(context.Context, io.Writer) error
+	serve            func(context.Context, io.Writer) error
+	healthcheck      func(context.Context) error
+	adminCreate      func(context.Context, io.Reader, io.Writer, passwordReader) error
+	backup           func(context.Context, io.Writer) error
+	classifyBackfill func(context.Context, io.Writer) error
 }
 
-const usage = "usage: radar serve | radar healthcheck | radar admin create | radar backup"
+const usage = "usage: radar serve | radar healthcheck | radar admin create | radar backup | radar classify backfill"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, term.ReadPassword); err != nil {
@@ -52,6 +54,7 @@ func main() {
 func run(ctx context.Context, args []string, input io.Reader, output io.Writer, readPassword passwordReader) error {
 	return runWithDeps(ctx, args, input, output, readPassword, commandDeps{
 		serve: runServe, healthcheck: runHealthcheck, adminCreate: runAdminCreate, backup: runBackup,
+		classifyBackfill: runClassifyBackfill,
 	})
 }
 
@@ -77,6 +80,11 @@ func runWithDeps(ctx context.Context, args []string, input io.Reader, output io.
 			return errors.New("backup command is unavailable")
 		}
 		return deps.backup(ctx, output)
+	case len(args) == 2 && args[0] == "classify" && args[1] == "backfill":
+		if deps.classifyBackfill == nil {
+			return errors.New("classify backfill command is unavailable")
+		}
+		return deps.classifyBackfill(ctx, output)
 	default:
 		return errors.New(usage)
 	}
@@ -295,6 +303,39 @@ func runBackup(ctx context.Context, output io.Writer) error {
 
 func backupDirectory(databasePath string) string {
 	return filepath.Join(filepath.Dir(databasePath), "backups")
+}
+
+// runClassifyBackfill 对整个库执行一次自动归类，并输出各分类的仓库数。
+func runClassifyBackfill(ctx context.Context, output io.Writer) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	store, err := db.Open(ctx, cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	engine, err := classify.LoadEngine(ctx, store.SQL())
+	if err != nil {
+		return err
+	}
+	result, err := classify.Backfill(ctx, store.SQL(), engine, 0)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "scanned %d repositories: categorized %d, unclassified %d, new assignments %d\n",
+		result.Scanned, result.Categorized, result.Unclassified, result.Assignments)
+
+	counts, err := classify.CategoryCounts(ctx, store.SQL())
+	if err != nil {
+		return err
+	}
+	for _, count := range counts {
+		fmt.Fprintf(output, "%s	%s	%d\n", count.Slug, count.Title, count.Repos)
+	}
+	return nil
 }
 
 func runAdminCreate(ctx context.Context, input io.Reader, output io.Writer, readPassword passwordReader) error {
