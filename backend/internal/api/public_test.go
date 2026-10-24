@@ -169,6 +169,15 @@ func seedCategory(t *testing.T, store *db.DB, id int64, slug, title string, sort
 	}
 }
 
+// clearSeededCategories 清空迁移 0006 seed 的默认分类，
+// 供使用自定义分类夹具的测试建立确定性的前置状态。
+func clearSeededCategories(t *testing.T, store *db.DB) {
+	t.Helper()
+	if _, err := store.SQL().Exec(`DELETE FROM categories`); err != nil {
+		t.Fatalf("clear seeded categories: %v", err)
+	}
+}
+
 func linkRepoCategory(t *testing.T, store *db.DB, repoGithubID, categoryID int64) {
 	t.Helper()
 	if _, err := store.SQL().Exec(
@@ -180,6 +189,7 @@ func linkRepoCategory(t *testing.T, store *db.DB, repoGithubID, categoryID int64
 
 func TestListCategoriesReturnsEnabledWithVisibleRepoCounts(t *testing.T) {
 	store := newTestStore(t)
+	clearSeededCategories(t, store)
 	seedPublicRepo(t, store, 701, "acme", "ai-one", 30)
 	seedPublicRepo(t, store, 702, "acme", "ai-two", 20)
 	seedPublicRepo(t, store, 703, "acme", "hidden-ai", 99)
@@ -223,6 +233,7 @@ func TestListCategoriesReturnsEnabledWithVisibleRepoCounts(t *testing.T) {
 
 func TestGetCategoryReturnsDetailAndNotFoundForUnknown(t *testing.T) {
 	store := newTestStore(t)
+	clearSeededCategories(t, store)
 	seedCategory(t, store, 21, "ai", "AI 与大模型", 1, true)
 	handler := newTestHandler(t, store)
 
@@ -252,6 +263,7 @@ func TestGetCategoryReturnsDetailAndNotFoundForUnknown(t *testing.T) {
 
 func TestListReposFiltersByCategorySlug(t *testing.T) {
 	store := newTestStore(t)
+	clearSeededCategories(t, store)
 	seedPublicRepo(t, store, 801, "acme", "in-ai", 30)
 	seedPublicRepo(t, store, 802, "acme", "outside", 20)
 	seedPublicRepo(t, store, 803, "acme", "hidden-in-ai", 99)

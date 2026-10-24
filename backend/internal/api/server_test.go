@@ -96,6 +96,7 @@ func TestReadyReturnsGenericServiceUnavailableWhenDatabaseIsClosed(t *testing.T)
 
 func TestStatsReturnsRealDatabaseCountsAndTimes(t *testing.T) {
 	store := newTestStore(t)
+	clearSeededCategories(t, store)
 	handler := newTestHandler(t, store)
 
 	recorder := request(t, handler, http.MethodGet, "/api/v1/stats")

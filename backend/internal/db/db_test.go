@@ -215,6 +215,10 @@ func TestIdentityAndJunctionUniquenessConstraints(t *testing.T) {
 	t.Parallel()
 
 	store := openTestDB(t)
+	// 迁移 0006 已 seed 14 个默认分类，本测试使用自己的分类夹具，先清空。
+	if _, err := store.SQL().Exec("DELETE FROM categories"); err != nil {
+		t.Fatalf("clear seeded categories: %v", err)
+	}
 	if _, err := store.SQL().Exec("INSERT INTO categories(id, slug, title) VALUES (1, 'ai', 'AI')"); err != nil {
 		t.Fatalf("insert category: %v", err)
 	}

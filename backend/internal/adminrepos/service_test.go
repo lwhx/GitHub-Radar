@@ -88,13 +88,13 @@ func TestImportUpdatesExistingRepositoryWithoutOverwritingModeration(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.db.Exec(`INSERT INTO categories(id, slug, title, sort_order, enabled) VALUES (7, 'manual', 'Manual', 0, 1)`); err != nil {
+	if _, err := service.db.Exec(`INSERT INTO categories(id, slug, title, sort_order, enabled) VALUES (707, 'manual', 'Manual', 0, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.db.Exec(`UPDATE repositories SET is_hidden = 1 WHERE id = ?`, first.Repository.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.db.Exec(`INSERT INTO repo_categories(repo_id, category_id, is_primary, source) VALUES (?, 7, 1, 'manual')`, first.Repository.ID); err != nil {
+	if _, err := service.db.Exec(`INSERT INTO repo_categories(repo_id, category_id, is_primary, source) VALUES (?, 707, 1, 'manual')`, first.Repository.ID); err != nil {
 		t.Fatal(err)
 	}
 	getter.repository.StargazersCount = 150
@@ -107,7 +107,7 @@ func TestImportUpdatesExistingRepositoryWithoutOverwritingModeration(t *testing.
 	if second.Created || !second.Repository.Hidden || second.Repository.StarsCount != 150 {
 		t.Fatalf("second Import() = %+v", second)
 	}
-	if len(second.Repository.CategoryIDs) != 1 || second.Repository.CategoryIDs[0] != 7 {
+	if len(second.Repository.CategoryIDs) != 1 || second.Repository.CategoryIDs[0] != 707 {
 		t.Fatalf("categories = %v", second.Repository.CategoryIDs)
 	}
 }
@@ -149,16 +149,16 @@ func TestUpdateReplacesManualCategoriesAndQueuesVisibleRepositoryResync(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.db.Exec(`INSERT INTO categories(id, slug, title, sort_order, enabled) VALUES (7, 'one', 'One', 0, 1), (8, 'two', 'Two', 1, 1)`); err != nil {
+	if _, err := service.db.Exec(`INSERT INTO categories(id, slug, title, sort_order, enabled) VALUES (707, 'one', 'One', 0, 1), (708, 'two', 'Two', 1, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	hidden := true
-	categories := []int64{8, 7, 8}
+	categories := []int64{708, 707, 708}
 	updated, err := service.Update(context.Background(), imported.Repository.ID, Update{Hidden: &hidden, CategoryIDs: &categories})
 	if err != nil {
 		t.Fatalf("hide Update() error = %v", err)
 	}
-	if !updated.Hidden || len(updated.CategoryIDs) != 2 || updated.CategoryIDs[0] != 8 || updated.CategoryIDs[1] != 7 {
+	if !updated.Hidden || len(updated.CategoryIDs) != 2 || updated.CategoryIDs[0] != 708 || updated.CategoryIDs[1] != 707 {
 		t.Fatalf("hide Update() = %+v", updated)
 	}
 	if _, err := service.Update(context.Background(), imported.Repository.ID, Update{Resync: true}); !errors.Is(err, ErrInvalidUpdate) {

@@ -27,6 +27,7 @@ func TestOverviewRequiresAuthenticationAndReturnsRealCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clearSeededCategories(t, store)
 	if _, err := store.SQL().Exec(`INSERT INTO categories(slug, title, enabled) VALUES ('one', 'One', 1), ('two', 'Two', 0)`); err != nil {
 		t.Fatal(err)
 	}

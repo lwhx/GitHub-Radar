@@ -30,6 +30,10 @@ func newServiceForTest(t *testing.T, now time.Time) (*Service, *appdb.DB, *time.
 
 func TestCreateProducesConsistentVerifiedBackup(t *testing.T) {
 	service, store, _ := newServiceForTest(t, time.Date(2026, 10, 24, 12, 30, 0, 123, time.UTC))
+	// 迁移 0006 已 seed 默认分类（含 slug 'ai'），本测试使用自己的夹具，先清空。
+	if _, err := store.SQL().Exec(`DELETE FROM categories`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.SQL().Exec(`INSERT INTO categories (slug, title) VALUES ('ai', 'AI')`); err != nil {
 		t.Fatal(err)
 	}
