@@ -133,6 +133,119 @@ func TestBackfillClassifiesRepositoriesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestClassifyManyReconcilesChangedRulesAndDeduplicatesRepositories(t *testing.T) {
+	t.Parallel()
+
+	store := openTestDB(t)
+	database := store.SQL()
+	repoID := insertRepo(t, database, "me/relay", "Telegram bot running in docker", "", []string{"telegram", "docker"})
+	engine, err := classify.LoadEngine(context.Background(), database)
+	if err != nil {
+		t.Fatalf("LoadEngine() error = %v", err)
+	}
+	if _, err := database.Exec(`
+		CREATE TABLE classify_write_audit (operation TEXT NOT NULL);
+		CREATE TRIGGER audit_repo_category_insert AFTER INSERT ON repo_categories
+		BEGIN INSERT INTO classify_write_audit(operation) VALUES ('insert'); END;
+		CREATE TRIGGER audit_repo_category_update AFTER UPDATE ON repo_categories
+		BEGIN INSERT INTO classify_write_audit(operation) VALUES ('update'); END;
+	`); err != nil {
+		t.Fatalf("create classification write audit: %v", err)
+	}
+	if err := classify.ClassifyMany(context.Background(), database, engine, []int64{repoID, repoID}); err != nil {
+		t.Fatalf("initial ClassifyMany() error = %v", err)
+	}
+	var initialWrites int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM classify_write_audit`).Scan(&initialWrites); err != nil {
+		t.Fatalf("count initial classification writes: %v", err)
+	}
+	if initialWrites != 2 {
+		t.Fatalf("classification writes for duplicate repository IDs = %d, want 2 (one per matched category)", initialWrites)
+	}
+	if assigned := assignedCategories(t, database, repoID); assigned["docker"] != 1 || assigned["telegram"] != 0 || len(assigned) != 2 {
+		t.Fatalf("initial assignments = %v, want docker primary + telegram", assigned)
+	}
+
+	if _, err := database.Exec(`UPDATE category_rules SET priority = 20
+		WHERE category_id = (SELECT id FROM categories WHERE slug = 'telegram') AND match_type = 'topic' AND pattern = 'telegram'`); err != nil {
+		t.Fatalf("raise telegram priority: %v", err)
+	}
+	engine, err = classify.LoadEngine(context.Background(), database)
+	if err != nil {
+		t.Fatalf("reload engine: %v", err)
+	}
+	if err := classify.ClassifyMany(context.Background(), database, engine, []int64{repoID, repoID}); err != nil {
+		t.Fatalf("ClassifyMany() after priority change error = %v", err)
+	}
+	if assigned := assignedCategories(t, database, repoID); assigned["telegram"] != 1 || assigned["docker"] != 0 || len(assigned) != 2 {
+		t.Fatalf("assignments after priority change = %v, want telegram primary + docker secondary", assigned)
+	}
+
+	if _, err := database.Exec(`UPDATE category_rules SET enabled = 0
+		WHERE category_id = (SELECT id FROM categories WHERE slug = 'docker')`); err != nil {
+		t.Fatalf("disable docker rules: %v", err)
+	}
+	engine, err = classify.LoadEngine(context.Background(), database)
+	if err != nil {
+		t.Fatalf("reload engine after disable: %v", err)
+	}
+	if err := classify.ClassifyMany(context.Background(), database, engine, []int64{repoID, repoID}); err != nil {
+		t.Fatalf("ClassifyMany() after disabling rules error = %v", err)
+	}
+	if assigned := assignedCategories(t, database, repoID); assigned["telegram"] != 1 || len(assigned) != 1 {
+		t.Fatalf("assignments after disabling docker = %v, want only telegram primary", assigned)
+	}
+	if _, err := database.Exec(`DELETE FROM classify_write_audit`); err != nil {
+		t.Fatalf("clear classification write audit: %v", err)
+	}
+	if err := classify.ClassifyMany(context.Background(), database, engine, []int64{repoID, repoID}); err != nil {
+		t.Fatalf("idempotent ClassifyMany() error = %v", err)
+	}
+	if assigned := assignedCategories(t, database, repoID); assigned["telegram"] != 1 || len(assigned) != 1 {
+		t.Fatalf("assignments after repeat = %v, want only telegram primary", assigned)
+	}
+	var repeatWrites int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM classify_write_audit`).Scan(&repeatWrites); err != nil {
+		t.Fatalf("count repeated classification writes: %v", err)
+	}
+	if repeatWrites != 0 {
+		t.Fatalf("classification writes on idempotent repeat = %d, want 0", repeatWrites)
+	}
+}
+
+func TestClassifyManyManualAssignmentOverridesAndRemovesAutoAssignments(t *testing.T) {
+	t.Parallel()
+
+	store := openTestDB(t)
+	database := store.SQL()
+	repoID := insertRepo(t, database, "me/tunnel-page", "Deploy on Cloudflare Pages with vue", "JavaScript", []string{"cloudflare-pages"})
+	engine, err := classify.LoadEngine(context.Background(), database)
+	if err != nil {
+		t.Fatalf("LoadEngine() error = %v", err)
+	}
+	if err := classify.ClassifyMany(context.Background(), database, engine, []int64{repoID}); err != nil {
+		t.Fatalf("initial ClassifyMany() error = %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO repo_categories (repo_id, category_id, is_primary, source)
+		VALUES (?, (SELECT id FROM categories WHERE slug = 'security'), 1, 'manual')`, repoID); err != nil {
+		t.Fatalf("insert manual assignment: %v", err)
+	}
+
+	if err := classify.ClassifyMany(context.Background(), database, engine, []int64{repoID}); err != nil {
+		t.Fatalf("ClassifyMany() with manual assignment error = %v", err)
+	}
+	if assigned := assignedCategories(t, database, repoID); assigned["security"] != 1 || len(assigned) != 1 {
+		t.Fatalf("assignments = %v, want only manual security primary", assigned)
+	}
+	var source string
+	if err := database.QueryRow(`SELECT source FROM repo_categories WHERE repo_id = ?`, repoID).Scan(&source); err != nil {
+		t.Fatalf("read remaining assignment source: %v", err)
+	}
+	if source != "manual" {
+		t.Fatalf("remaining assignment source = %q, want manual", source)
+	}
+}
+
 func TestClassifyOneIsIdempotentAndKeepsManualAssignments(t *testing.T) {
 	t.Parallel()
 
@@ -174,8 +287,8 @@ func TestClassifyOneIsIdempotentAndKeepsManualAssignments(t *testing.T) {
 	if source != "manual" || primary != 1 {
 		t.Fatalf("manual assignment overwritten: source = %q, primary = %d", source, primary)
 	}
-	if assigned := assignedCategories(t, database, page); assigned["cloudflare"] != 1 || len(assigned) != 2 {
-		t.Fatalf("page assignments = %v, want manual frontend + auto cloudflare primary", assigned)
+	if assigned := assignedCategories(t, database, page); assigned["frontend"] != 1 || len(assigned) != 1 {
+		t.Fatalf("page assignments = %v, want only manual frontend primary", assigned)
 	}
 }
 

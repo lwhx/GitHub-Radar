@@ -29,7 +29,7 @@ type repoRecord struct {
 	repo Repo
 }
 
-// Backfill 对全库仓库分批归类：每批一个事务，INSERT OR IGNORE 保证重复执行幂等。
+// Backfill 对全库仓库分批归类：每批一个事务，并按当前规则协调自动归类。
 func Backfill(ctx context.Context, database *sql.DB, engine *Engine, batchSize int) (BackfillResult, error) {
 	var result BackfillResult
 	if engine == nil {
@@ -62,20 +62,24 @@ func Backfill(ctx context.Context, database *sql.DB, engine *Engine, batchSize i
 	}
 }
 
-// ClassifyOne 归类单个仓库（采集集成入口）：重复执行幂等，
-// 已存在的归类行（含 source='manual' 的人工归类）不会被覆盖。
+// ClassifyOne 归类单个仓库（采集集成入口），复用批量归类路径。
 func ClassifyOne(ctx context.Context, database *sql.DB, engine *Engine, repoID int64) error {
+	return ClassifyMany(ctx, database, engine, []int64{repoID})
+}
+
+// ClassifyMany 批量加载并归类仓库。重复 ID 只处理一次；所有写入共用一个事务。
+func ClassifyMany(ctx context.Context, database *sql.DB, engine *Engine, repoIDs []int64) error {
 	if engine == nil {
 		return errors.New("classify engine is nil")
 	}
-	record, found, err := loadRepo(ctx, database, repoID)
+	records, err := loadRepos(ctx, database, repoIDs)
 	if err != nil {
 		return err
 	}
-	if !found {
+	if len(records) == 0 {
 		return nil
 	}
-	_, _, err = storeRepoBatch(ctx, database, engine, []repoRecord{record})
+	_, _, err = storeRepoBatch(ctx, database, engine, records)
 	return err
 }
 
@@ -135,18 +139,48 @@ func loadRepoBatch(ctx context.Context, database *sql.DB, afterID int64, limit i
 	return records, nil
 }
 
-func loadRepo(ctx context.Context, database *sql.DB, repoID int64) (repoRecord, bool, error) {
-	row := database.QueryRowContext(ctx, `
+func loadRepos(ctx context.Context, database *sql.DB, repoIDs []int64) ([]repoRecord, error) {
+	unique := make([]int64, 0, len(repoIDs))
+	seen := make(map[int64]struct{}, len(repoIDs))
+	for _, repoID := range repoIDs {
+		if repoID <= 0 {
+			continue
+		}
+		if _, exists := seen[repoID]; exists {
+			continue
+		}
+		seen[repoID] = struct{}{}
+		unique = append(unique, repoID)
+	}
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	arguments := make([]any, len(unique))
+	for index, repoID := range unique {
+		arguments[index] = repoID
+	}
+	rows, err := database.QueryContext(ctx, `
 		SELECT id, name, full_name, COALESCE(description, ''), COALESCE(language, ''), topics_json
-		FROM repositories WHERE id = ?`, repoID)
-	record, err := scanRepoRecord(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return repoRecord{}, false, nil
-	}
+		FROM repositories WHERE id IN (`+placeholders+`) ORDER BY id`, arguments...)
 	if err != nil {
-		return repoRecord{}, false, err
+		return nil, fmt.Errorf("load repositories for classification: %w", err)
 	}
-	return record, true, nil
+	defer rows.Close()
+
+	records := make([]repoRecord, 0, len(unique))
+	for rows.Next() {
+		record, err := scanRepoRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repositories for classification: %w", err)
+	}
+	return records, nil
 }
 
 type rowScanner interface {
@@ -179,7 +213,12 @@ func parseTopics(raw string) ([]string, error) {
 	return topics, nil
 }
 
-// storeRepoBatch 在一个事务内写入一批归类行，返回（新增行数, 命中仓库数, 错误）。
+type storedAssignment struct {
+	categoryID int64
+	source     string
+}
+
+// storeRepoBatch 在一个事务内协调一批归类行，返回（新增行数, 命中仓库数, 错误）。
 func storeRepoBatch(ctx context.Context, database *sql.DB, engine *Engine, records []repoRecord) (int, int, error) {
 	var assignments, categorized int
 	err := retryBusy(ctx, func() error {
@@ -189,22 +228,64 @@ func storeRepoBatch(ctx context.Context, database *sql.DB, engine *Engine, recor
 		}
 		defer tx.Rollback()
 
+		existing, err := loadStoredAssignments(ctx, tx, records)
+		if err != nil {
+			return err
+		}
 		assignments, categorized = 0, 0
 		for _, record := range records {
-			matches := engine.ClassifyRepo(record.repo)
-			if len(matches) == 0 {
+			stored := existing[record.id]
+			hasManual := false
+			for _, assignment := range stored {
+				if assignment.source == "manual" {
+					hasManual = true
+					break
+				}
+			}
+			if hasManual {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM repo_categories
+					WHERE repo_id = ? AND source = 'auto'`, record.id); err != nil {
+					return fmt.Errorf("remove automatic categories for manually classified repository %d: %w", record.id, err)
+				}
 				continue
 			}
-			categorized++
+
+			matches := engine.ClassifyRepo(record.repo)
+			if len(matches) > 0 {
+				categorized++
+			}
+			matched := make(map[int64]Match, len(matches))
 			for _, match := range matches {
-				inserted, err := tx.ExecContext(ctx, `
-					INSERT OR IGNORE INTO repo_categories (repo_id, category_id, is_primary, source)
-					VALUES (?, ?, ?, 'auto')`, record.id, match.CategoryID, boolToInt(match.IsPrimary))
+				matched[match.CategoryID] = match
+			}
+			for _, assignment := range stored {
+				if assignment.source != "auto" {
+					continue
+				}
+				if _, keep := matched[assignment.categoryID]; keep {
+					continue
+				}
+				if _, err := tx.ExecContext(ctx, `DELETE FROM repo_categories
+					WHERE repo_id = ? AND category_id = ? AND source = 'auto'`, record.id, assignment.categoryID); err != nil {
+					return fmt.Errorf("remove stale category for repository %d: %w", record.id, err)
+				}
+			}
+
+			for _, match := range matches {
+				_, alreadyStored := stored[match.CategoryID]
+				result, err := tx.ExecContext(ctx, `
+					INSERT INTO repo_categories (repo_id, category_id, is_primary, source)
+					VALUES (?, ?, ?, 'auto')
+					ON CONFLICT(repo_id, category_id) DO UPDATE SET is_primary = excluded.is_primary
+					WHERE repo_categories.source = 'auto'
+						AND repo_categories.is_primary <> excluded.is_primary`, record.id, match.CategoryID, boolToInt(match.IsPrimary))
 				if err != nil {
 					return fmt.Errorf("store category %s for repository %d: %w", match.Slug, record.id, err)
 				}
-				if affected, err := inserted.RowsAffected(); err == nil && affected > 0 {
-					assignments++
+				if !alreadyStored {
+					if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+						assignments++
+					}
 				}
 			}
 		}
@@ -214,6 +295,37 @@ func storeRepoBatch(ctx context.Context, database *sql.DB, engine *Engine, recor
 		return nil
 	})
 	return assignments, categorized, err
+}
+
+func loadStoredAssignments(ctx context.Context, tx *sql.Tx, records []repoRecord) (map[int64]map[int64]storedAssignment, error) {
+	stored := make(map[int64]map[int64]storedAssignment, len(records))
+	if len(records) == 0 {
+		return stored, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(records)), ",")
+	arguments := make([]any, len(records))
+	for index, record := range records {
+		arguments[index] = record.id
+		stored[record.id] = make(map[int64]storedAssignment)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT repo_id, category_id, source FROM repo_categories
+		WHERE repo_id IN (`+placeholders+`)`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("load stored category assignments: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var repoID int64
+		var assignment storedAssignment
+		if err := rows.Scan(&repoID, &assignment.categoryID, &assignment.source); err != nil {
+			return nil, fmt.Errorf("scan stored category assignment: %w", err)
+		}
+		stored[repoID][assignment.categoryID] = assignment
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stored category assignments: %w", err)
+	}
+	return stored, nil
 }
 
 func boolToInt(value bool) int {
