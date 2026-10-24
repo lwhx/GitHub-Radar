@@ -224,6 +224,58 @@ func TestProcessPendingRetriesSamePageAfterClassificationFailure(t *testing.T) {
 	}
 }
 
+func TestProcessPendingRetriesThirdPageWithPersistedPageNumber(t *testing.T) {
+	t.Parallel()
+
+	searcher := newFakeSearcher()
+	from := time.Date(2026, 10, 22, 11, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	const page3URL = "https://api.github.test/search/repositories?page=3"
+	item := repo(76, "delta/page-three-mcp", 3)
+	item.Topics = []string{"mcp"}
+	searcher.next[page3URL] = page{
+		result: github.SearchResult{TotalCount: 3, Items: []github.Repository{item}},
+	}
+	worker, database := newTestCollector(t, searcher)
+	ctx := context.Background()
+	windowID, err := worker.EnsureWindow(ctx, from, to, 0)
+	if err != nil {
+		t.Fatalf("EnsureWindow() error = %v", err)
+	}
+	if _, err := database.Exec(`UPDATE collection_windows SET page = 3, next_url = ? WHERE id = ?`, page3URL, windowID); err != nil {
+		t.Fatalf("prepare third page window: %v", err)
+	}
+	if _, err := database.Exec(`ALTER TABLE category_rules RENAME TO category_rules_unavailable`); err != nil {
+		t.Fatalf("hide category_rules: %v", err)
+	}
+	if _, err := worker.ProcessPending(ctx, 0); err == nil {
+		t.Fatal("ProcessPending() succeeded while third page classification rules were unavailable")
+	}
+	if _, err := database.Exec(`ALTER TABLE category_rules_unavailable RENAME TO category_rules`); err != nil {
+		t.Fatalf("restore category_rules: %v", err)
+	}
+	if _, err := worker.ProcessPending(ctx, 0); err != nil {
+		t.Fatalf("retry third page ProcessPending() error = %v", err)
+	}
+	var pageNumber, repositories, snapshots int
+	var status string
+	if err := database.QueryRow(`SELECT page, coverage_status FROM collection_windows WHERE id = ?`, windowID).Scan(&pageNumber, &status); err != nil {
+		t.Fatalf("read completed third-page window: %v", err)
+	}
+	if pageNumber != 4 || status != statusCompleted {
+		t.Fatalf("completed third-page window = page %d status %q, want page 4 completed", pageNumber, status)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM repositories WHERE github_id = 76`).Scan(&repositories); err != nil {
+		t.Fatalf("count retried repository: %v", err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM star_snapshots ss JOIN repositories r ON r.id = ss.repo_id WHERE r.github_id = 76`).Scan(&snapshots); err != nil {
+		t.Fatalf("count retried snapshots: %v", err)
+	}
+	if repositories != 1 || snapshots != 1 {
+		t.Fatalf("retry counts = repositories %d snapshots %d, want 1 and 1", repositories, snapshots)
+	}
+}
+
 func assertAssignments(t *testing.T, database *sql.DB, repoID int64, want map[string]int) {
 	t.Helper()
 	rows, err := database.Query(`SELECT c.slug, rc.is_primary FROM repo_categories rc

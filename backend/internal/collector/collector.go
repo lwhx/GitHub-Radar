@@ -150,10 +150,7 @@ func (collector *Collector) ProcessWindow(ctx context.Context, windowID int64) (
 	}
 	summary := Summary{Windows: 1}
 	nextURL := window.NextURL
-	page := 1
-	if nextURL != "" {
-		page = 2
-	}
+	page := window.Page
 	for {
 		if page > collector.maxPages {
 			if err := collector.markIncomplete(ctx, windowID, "search page limit reached"); err != nil {
@@ -214,6 +211,7 @@ func (collector *Collector) ProcessWindow(ctx context.Context, windowID int64) (
 type window struct {
 	ID       int64
 	RunID    int64
+	Page     int
 	From     time.Time
 	To       time.Time
 	Depth    int
@@ -231,8 +229,8 @@ func (collector *Collector) loadWindow(ctx context.Context, windowID int64) (win
 	var from, to string
 	var nextURL sql.NullString
 	var runID sql.NullInt64
-	err := collector.db.QueryRowContext(ctx, `SELECT id, job_run_id, time_from, time_to, split_depth, coverage_status, next_url, attempt_count
-		FROM collection_windows WHERE id = ?`, windowID).Scan(&item.ID, &runID, &from, &to, &item.Depth, &item.Status, &nextURL, &item.Attempts)
+	err := collector.db.QueryRowContext(ctx, `SELECT id, job_run_id, page, time_from, time_to, split_depth, coverage_status, next_url, attempt_count
+		FROM collection_windows WHERE id = ?`, windowID).Scan(&item.ID, &runID, &item.Page, &from, &to, &item.Depth, &item.Status, &nextURL, &item.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return window{}, fmt.Errorf("collection window %d does not exist", windowID)
 	}
