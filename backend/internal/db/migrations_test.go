@@ -81,6 +81,8 @@ func TestORMKeywordCleanupMigrationRemovesOnlyPollutedAutoAssignments(t *testing
 	topicORM := insertRepo(2, "me/query-builder", "typed queries", `["orm"]`)
 	otherRule := insertRepo(3, "me/postgres-tools", "PostgreSQL database utilities", `[]`)
 	manual := insertRepo(4, "me/transform", "normal formatter", `[]`)
+	fallback := insertRepo(5, "me/format-notes", "personal knowledge platform", `[]`)
+	manualOverride := insertRepo(6, "me/manual-override", "PostgreSQL database platform", `[]`)
 	for _, assignment := range []struct {
 		repoID int64
 		source string
@@ -94,6 +96,18 @@ func TestORMKeywordCleanupMigrationRemovesOnlyPollutedAutoAssignments(t *testing
 			VALUES (?, (SELECT id FROM categories WHERE slug = 'data-database'), 1, ?)`, assignment.repoID, assignment.source); err != nil {
 			t.Fatalf("insert %s assignment for repository %d: %v", assignment.source, assignment.repoID, err)
 		}
+	}
+	// 删除原主分类后，剩余自动分类必须接管主分类。
+	if _, err := sqlDB.Exec(`INSERT INTO repo_categories (repo_id, category_id, is_primary, source) VALUES
+		(?, (SELECT id FROM categories WHERE slug = 'data-database'), 1, 'auto'),
+		(?, (SELECT id FROM categories WHERE slug = 'productivity'), 0, 'auto')`, fallback, fallback); err != nil {
+		t.Fatalf("insert fallback assignments: %v", err)
+	}
+	// 人工覆盖存在时，迁移后不得残留任何自动归类。
+	if _, err := sqlDB.Exec(`INSERT INTO repo_categories (repo_id, category_id, is_primary, source) VALUES
+		(?, (SELECT id FROM categories WHERE slug = 'productivity'), 1, 'manual'),
+		(?, (SELECT id FROM categories WHERE slug = 'data-database'), 0, 'auto')`, manualOverride, manualOverride); err != nil {
+		t.Fatalf("insert manual override assignments: %v", err)
 	}
 
 	if err := migrateFS(context.Background(), sqlDB, migrations.Files); err != nil {
@@ -130,6 +144,21 @@ func TestORMKeywordCleanupMigrationRemovesOnlyPollutedAutoAssignments(t *testing
 				t.Errorf("assignment count = %d, want %d", count, test.want)
 			}
 		})
+	}
+	var fallbackPrimary int
+	if err := sqlDB.QueryRow(`SELECT is_primary FROM repo_categories
+		WHERE repo_id = ? AND category_id = (SELECT id FROM categories WHERE slug = 'productivity')`, fallback).Scan(&fallbackPrimary); err != nil {
+		t.Fatalf("read fallback primary: %v", err)
+	}
+	if fallbackPrimary != 1 {
+		t.Errorf("fallback primary = %d, want 1", fallbackPrimary)
+	}
+	var leftoverAuto int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM repo_categories WHERE repo_id = ? AND source = 'auto'`, manualOverride).Scan(&leftoverAuto); err != nil {
+		t.Fatalf("count automatic assignments beside manual override: %v", err)
+	}
+	if leftoverAuto != 0 {
+		t.Errorf("automatic assignments beside manual override = %d, want 0", leftoverAuto)
 	}
 }
 

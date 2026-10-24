@@ -30,3 +30,27 @@ WHERE source = 'auto'
                 AND r.language <> '' AND lower(r.language) = lower(rule.pattern))
         )
   );
+
+-- 人工归类优先：旧版本可能在 manual 旁残留 auto 行，迁移时立即清理。
+DELETE FROM repo_categories
+WHERE source = 'auto'
+  AND EXISTS (
+      SELECT 1
+      FROM repo_categories AS manual_assignment
+      WHERE manual_assignment.repo_id = repo_categories.repo_id
+        AND manual_assignment.source = 'manual'
+  );
+
+-- 删除误分类后，规范化纯自动归类：每个仓库恰好一个主分类。
+-- 优先保留原主分类；没有主分类或存在多个主分类时按分类顺序稳定选一个。
+UPDATE repo_categories
+SET is_primary = CASE WHEN category_id = (
+    SELECT automatic_assignment.category_id
+    FROM repo_categories AS automatic_assignment
+    JOIN categories AS category ON category.id = automatic_assignment.category_id
+    WHERE automatic_assignment.repo_id = repo_categories.repo_id
+      AND automatic_assignment.source = 'auto'
+    ORDER BY automatic_assignment.is_primary DESC, category.sort_order, category.id
+    LIMIT 1
+) THEN 1 ELSE 0 END
+WHERE source = 'auto';
