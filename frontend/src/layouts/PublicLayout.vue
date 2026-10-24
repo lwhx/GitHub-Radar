@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 
+import { authState, ensureSession } from '../stores/auth'
 import { isDark, toggleTheme } from '../stores/theme'
 
 interface NavItem {
@@ -16,7 +17,6 @@ const navItems: NavItem[] = [
   { label: '探索项目', to: '/repos' },
   { label: '分类专题', to: '/categories' },
   { label: '我的关注', to: '/favorites' },
-  { label: '管理后台', to: '/admin/login' },
 ]
 
 const drawerOpen = ref(false)
@@ -24,6 +24,10 @@ const drawerOpen = ref(false)
 function closeDrawer() {
   drawerOpen.value = false
 }
+
+onMounted(() => {
+  void ensureSession().catch(() => false)
+})
 </script>
 
 <template>
@@ -67,6 +71,15 @@ function closeDrawer() {
               <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
             </svg>
           </button>
+          <nav class="flex items-center gap-2" aria-label="账户导航">
+            <span v-if="authState.user" class="hidden text-sm text-muted sm:inline">{{ authState.user.username }}</span>
+            <RouterLink
+              :to="authState.user ? '/admin' : '/admin/login'"
+              class="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-muted hover:bg-bg hover:text-fg"
+            >
+              {{ authState.user ? '管理后台' : '管理员登录' }}
+            </RouterLink>
+          </nav>
         </div>
       </div>
     </header>
@@ -129,8 +142,7 @@ function closeDrawer() {
     <footer class="border-t border-line py-4 text-center text-xs text-muted">
       <p>GitHub Radar 是独立的第三方开源项目发现平台，与 GitHub, Inc. 无隶属关系，非 GitHub 官方产品。</p>
       <p class="mt-1">
-        数据来源于 GitHub 公开 API ·
-        <RouterLink to="/admin/login" class="underline hover:text-fg">管理员入口</RouterLink>
+        数据来源于 GitHub 公开 API
       </p>
     </footer>
   </div>

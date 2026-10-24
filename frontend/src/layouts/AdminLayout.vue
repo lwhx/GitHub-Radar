@@ -16,8 +16,17 @@ async function onLogout() {
   <div class="flex min-h-screen flex-col">
     <header class="sticky top-0 z-20 border-b border-line bg-card">
       <div class="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
-        <span class="font-semibold"><span class="text-accent" aria-hidden="true">◉</span> GitHub Radar 管理后台</span>
+        <RouterLink to="/" class="font-semibold" aria-label="返回 GitHub Radar 前台首页">
+          <span class="text-accent" aria-hidden="true">◉</span> GitHub Radar 管理后台
+        </RouterLink>
         <div class="ml-auto flex items-center gap-2">
+          <RouterLink
+            to="/"
+            data-testid="back-to-public"
+            class="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-muted hover:bg-bg hover:text-fg"
+          >
+            返回前台
+          </RouterLink>
           <span class="text-sm text-muted">{{ authState.user?.username }}</span>
           <button
             type="button"
