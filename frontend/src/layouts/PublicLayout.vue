@@ -16,6 +16,7 @@ const navItems: NavItem[] = [
   { label: '探索项目', to: '/repos' },
   { label: '分类专题', to: '/categories' },
   { label: '我的关注', to: '/favorites' },
+  { label: '管理后台', to: '/admin/login' },
 ]
 
 const drawerOpen = ref(false)
