@@ -74,13 +74,17 @@ func TestDefaultCategoriesSeedIsIdempotent(t *testing.T) {
 		t.Fatal("seed must insert rules, got 0")
 	}
 
-	// 再次执行迁移 SQL 本体：不允许出现重复分类或重复规则。
+	// 再次执行 seed 与后续清理 SQL：最终状态不允许出现重复分类或规则。
 	seedSQL, err := migrations.Files.ReadFile("0006_default_categories.sql")
 	if err != nil {
 		t.Fatalf("read seed migration: %v", err)
 	}
-	if _, err := database.Exec(string(seedSQL)); err != nil {
-		t.Fatalf("re-execute seed migration: %v", err)
+	cleanupSQL, err := migrations.Files.ReadFile("0007_remove_orm_keyword.sql")
+	if err != nil {
+		t.Fatalf("read cleanup migration: %v", err)
+	}
+	if _, err := database.Exec(string(seedSQL) + "\n" + string(cleanupSQL)); err != nil {
+		t.Fatalf("re-execute seed and cleanup migrations: %v", err)
 	}
 
 	var categories int
@@ -189,6 +193,35 @@ func matchSlugs(matches []classify.Match) []string {
 		slugs = append(slugs, match.Slug)
 	}
 	return slugs
+}
+
+func TestEngineMatchesNegativePriorityRule(t *testing.T) {
+	t.Parallel()
+
+	store := openTestDB(t)
+	database := store.SQL()
+	if _, err := database.Exec(`INSERT INTO categories (slug, title, sort_order, enabled)
+		VALUES ('negative-only', 'Negative only', 100, 1)`); err != nil {
+		t.Fatalf("insert category: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO category_rules (category_id, match_type, pattern, priority, enabled)
+		VALUES ((SELECT id FROM categories WHERE slug = 'negative-only'), 'topic', 'negative-match', -7, 1)`); err != nil {
+		t.Fatalf("insert negative-priority rule: %v", err)
+	}
+	engine, err := classify.LoadEngine(context.Background(), database)
+	if err != nil {
+		t.Fatalf("LoadEngine() error = %v", err)
+	}
+
+	matches := engine.ClassifyRepo(classify.Repo{
+		Name: "plain", FullName: "me/plain", Topics: []string{"negative-match"},
+	})
+	if got := matchSlugs(matches); len(got) != 1 || got[0] != "negative-only" {
+		t.Fatalf("ClassifyRepo() slugs = %v, want [negative-only]", got)
+	}
+	if matches[0].Priority != -7 || !matches[0].IsPrimary {
+		t.Fatalf("ClassifyRepo() match = %+v, want priority -7 primary", matches[0])
+	}
 }
 
 func TestEngineSkipsDisabledRulesAndCategories(t *testing.T) {

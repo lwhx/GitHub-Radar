@@ -101,7 +101,8 @@ func (engine *Engine) ClassifyRepo(repo Repo) []Match {
 		strings.Join([]string{repo.Name, repo.FullName, repo.Description}, "\n"))
 	best := make(map[int64]int)
 	for _, rule := range engine.rules {
-		if rule.Priority <= best[rule.CategoryID] {
+		priority, exists := best[rule.CategoryID]
+		if exists && rule.Priority <= priority {
 			continue
 		}
 		if rule.matches(repo, haystack) {

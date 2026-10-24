@@ -48,6 +48,91 @@ func TestP12CollectorMigrationAddsRequiredState(t *testing.T) {
 	}
 }
 
+func TestORMKeywordCleanupMigrationRemovesOnlyPollutedAutoAssignments(t *testing.T) {
+	t.Parallel()
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "radar.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	if err := migrateFS(context.Background(), sqlDB, migrationFilesThrough(t, "0006_")); err != nil {
+		t.Fatalf("migrate through version 6: %v", err)
+	}
+
+	insertRepo := func(githubID int64, fullName, description, topicsJSON string) int64 {
+		t.Helper()
+		parts := strings.SplitN(fullName, "/", 2)
+		result, err := sqlDB.Exec(`INSERT INTO repositories (
+			github_id, owner, name, full_name, html_url, description, topics_json,
+			github_created_at, github_updated_at, first_seen_at, sync_status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, '2026-10-23T00:00:00Z', '2026-10-23T00:00:00Z', '2026-10-23T00:00:00Z', 'ok')`,
+			githubID, parts[0], parts[1], fullName, "https://example.test/"+fullName, description, topicsJSON)
+		if err != nil {
+			t.Fatalf("insert repository %s: %v", fullName, err)
+		}
+		id, _ := result.LastInsertId()
+		return id
+	}
+	falsePositive := insertRepo(1, "me/performance", "platform information formatter", `[]`)
+	topicORM := insertRepo(2, "me/query-builder", "typed queries", `["orm"]`)
+	otherRule := insertRepo(3, "me/postgres-tools", "PostgreSQL database utilities", `[]`)
+	manual := insertRepo(4, "me/transform", "normal formatter", `[]`)
+	for _, assignment := range []struct {
+		repoID int64
+		source string
+	}{
+		{falsePositive, "auto"},
+		{topicORM, "auto"},
+		{otherRule, "auto"},
+		{manual, "manual"},
+	} {
+		if _, err := sqlDB.Exec(`INSERT INTO repo_categories (repo_id, category_id, is_primary, source)
+			VALUES (?, (SELECT id FROM categories WHERE slug = 'data-database'), 1, ?)`, assignment.repoID, assignment.source); err != nil {
+			t.Fatalf("insert %s assignment for repository %d: %v", assignment.source, assignment.repoID, err)
+		}
+	}
+
+	if err := migrateFS(context.Background(), sqlDB, migrations.Files); err != nil {
+		t.Fatalf("apply cleanup migration: %v", err)
+	}
+
+	var badRuleCount int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM category_rules
+		WHERE category_id = (SELECT id FROM categories WHERE slug = 'data-database')
+			AND match_type = 'keyword' AND pattern = 'orm'`).Scan(&badRuleCount); err != nil {
+		t.Fatalf("count bad ORM keyword rule: %v", err)
+	}
+	if badRuleCount != 0 {
+		t.Errorf("bad ORM keyword rule count = %d, want 0", badRuleCount)
+	}
+
+	for _, test := range []struct {
+		name   string
+		repoID int64
+		want   int
+	}{
+		{name: "false substring auto assignment removed", repoID: falsePositive, want: 0},
+		{name: "exact ORM topic auto assignment kept", repoID: topicORM, want: 1},
+		{name: "other database rule auto assignment kept", repoID: otherRule, want: 1},
+		{name: "manual assignment kept", repoID: manual, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var count int
+			if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM repo_categories
+				WHERE repo_id = ? AND category_id = (SELECT id FROM categories WHERE slug = 'data-database')`, test.repoID).Scan(&count); err != nil {
+				t.Fatalf("count assignment: %v", err)
+			}
+			if count != test.want {
+				t.Errorf("assignment count = %d, want %d", count, test.want)
+			}
+		})
+	}
+}
+
 func TestCollectionWindowsRejectDuplicateLogicalRangeAfterPageAdvance(t *testing.T) {
 	t.Parallel()
 
