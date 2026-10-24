@@ -49,6 +49,134 @@ func TestProcessPendingAssignsAutoCategoriesToStoredRepositories(t *testing.T) {
 	assertAssignments(t, database, repoID, map[string]int{"mcp": 1, "self-hosted": 0, "backend": 0})
 }
 
+func TestClassifyStoredRetriesRuleLoadingAfterFailure(t *testing.T) {
+	t.Parallel()
+
+	worker, database := newTestCollector(t, newFakeSearcher())
+	ctx := context.Background()
+	item := repo(70, "delta/mcp-retry", 1)
+	item.Topics = []string{"mcp"}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin repository insert: %v", err)
+	}
+	repoID, _, _, err := upsertRepository(ctx, tx, item, formatTime(worker.now()))
+	if err != nil {
+		t.Fatalf("insert repository: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit repository insert: %v", err)
+	}
+	if _, err := database.Exec(`ALTER TABLE category_rules RENAME TO category_rules_unavailable`); err != nil {
+		t.Fatalf("hide category_rules: %v", err)
+	}
+	worker.classifyStored(ctx, []int64{repoID})
+	if _, err := database.Exec(`ALTER TABLE category_rules_unavailable RENAME TO category_rules`); err != nil {
+		t.Fatalf("restore category_rules: %v", err)
+	}
+
+	worker.classifyStored(ctx, []int64{repoID})
+	assertAssignments(t, database, repoID, map[string]int{"mcp": 1})
+}
+
+func TestClassifyStoredReloadsChangedRulesAndReconcilesAssignments(t *testing.T) {
+	t.Parallel()
+
+	worker, database := newTestCollector(t, newFakeSearcher())
+	ctx := context.Background()
+	item := repo(71, "delta/docker-tool", 1)
+	item.Topics = []string{"docker"}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin repository insert: %v", err)
+	}
+	repoID, _, _, err := upsertRepository(ctx, tx, item, formatTime(worker.now()))
+	if err != nil {
+		t.Fatalf("insert repository: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit repository insert: %v", err)
+	}
+
+	worker.classifyStored(ctx, []int64{repoID})
+	assertAssignments(t, database, repoID, map[string]int{"docker": 1})
+	if _, err := database.Exec(`UPDATE category_rules SET enabled = 0
+		WHERE category_id = (SELECT id FROM categories WHERE slug = 'docker')`); err != nil {
+		t.Fatalf("disable docker rules: %v", err)
+	}
+	worker.classifyStored(ctx, []int64{repoID})
+	assertAssignments(t, database, repoID, map[string]int{})
+}
+
+func TestClassifyStoredLoadsRulesAddedAfterEmptyBatch(t *testing.T) {
+	t.Parallel()
+
+	worker, database := newTestCollector(t, newFakeSearcher())
+	ctx := context.Background()
+	item := repo(74, "delta/later-rule", 1)
+	item.Topics = []string{"later-topic"}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin repository insert: %v", err)
+	}
+	repoID, _, _, err := upsertRepository(ctx, tx, item, formatTime(worker.now()))
+	if err != nil {
+		t.Fatalf("insert repository: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit repository insert: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE category_rules SET enabled = 0`); err != nil {
+		t.Fatalf("disable all rules: %v", err)
+	}
+	worker.classifyStored(ctx, []int64{repoID})
+	assertAssignments(t, database, repoID, map[string]int{})
+
+	if _, err := database.Exec(`
+		INSERT INTO categories (slug, title, sort_order, enabled) VALUES ('later', 'Later', 100, 1);
+		INSERT INTO category_rules (category_id, match_type, pattern, priority, enabled)
+		VALUES ((SELECT id FROM categories WHERE slug = 'later'), 'topic', 'later-topic', 10, 1);
+	`); err != nil {
+		t.Fatalf("insert later rule: %v", err)
+	}
+	worker.classifyStored(ctx, []int64{repoID})
+	assertAssignments(t, database, repoID, map[string]int{"later": 1})
+}
+
+func TestProcessPendingClassifiesMultipleRepositoriesFromOnePage(t *testing.T) {
+	t.Parallel()
+
+	searcher := newFakeSearcher()
+	from := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	mcp := repo(72, "delta/mcp-service", 2)
+	mcp.Topics = []string{"mcp"}
+	docker := repo(73, "delta/container", 3)
+	docker.Topics = []string{"docker"}
+	searcher.windows[windowKey(from, to)] = []page{{
+		result: github.SearchResult{TotalCount: 2, Items: []github.Repository{mcp, docker}},
+	}}
+	worker, database := newTestCollector(t, searcher)
+	ctx := context.Background()
+	if _, err := worker.EnsureWindow(ctx, from, to, 0); err != nil {
+		t.Fatalf("EnsureWindow() error = %v", err)
+	}
+	if _, err := worker.ProcessPending(ctx, 0); err != nil {
+		t.Fatalf("ProcessPending() error = %v", err)
+	}
+
+	for githubID, want := range map[int64]map[string]int{
+		72: {"mcp": 1},
+		73: {"docker": 1},
+	} {
+		var repoID int64
+		if err := database.QueryRow(`SELECT id FROM repositories WHERE github_id = ?`, githubID).Scan(&repoID); err != nil {
+			t.Fatalf("load repository %d: %v", githubID, err)
+		}
+		assertAssignments(t, database, repoID, want)
+	}
+}
+
 func assertAssignments(t *testing.T, database *sql.DB, repoID int64, want map[string]int) {
 	t.Helper()
 	rows, err := database.Query(`SELECT c.slug, rc.is_primary FROM repo_categories rc

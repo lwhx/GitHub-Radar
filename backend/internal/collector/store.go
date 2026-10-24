@@ -154,7 +154,7 @@ func (collector *Collector) storePage(ctx context.Context, windowID int64, item 
 	if err := tx.Commit(); err != nil {
 		return summary, fmt.Errorf("commit page storage: %w", err)
 	}
-	// 仓库已入库，归类失败仅记日志，不影响采集结果。
+	// 已存在仓库的描述、topics、language 也可能随搜索结果更新，仍需重算以移除过期自动归类。
 	collector.classifyStored(ctx, storedIDs)
 	return summary, nil
 }
